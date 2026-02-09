@@ -12,10 +12,16 @@ Write, update, and manage notes in the personal Obsidian vault.
 
 ## Vault Path
 
-The vault lives at an absolute path. Always use absolute paths so the skill works regardless of the current working directory.
+The vault path is configured via the `DOCS_VAULT_PATH` environment variable. Always use absolute paths so the skill works regardless of the current working directory.
 
-- **Vault root:** `/home/tvd/dev/tvdavies/docs/`
+- **Vault root:** `$DOCS_VAULT_PATH` (defaults to `/home/tvd/dev/tvdavies/docs`)
 - **Git remote:** `git@github.com:tvdavies/docs.git` (branch: `main`)
+
+Before any operation, resolve the vault path:
+
+```bash
+DOCS_VAULT_PATH="${DOCS_VAULT_PATH:-/home/tvd/dev/tvdavies/docs}"
+```
 
 ## Directory Routing
 
@@ -23,11 +29,11 @@ Route content to the correct top-level directory based on its type:
 
 | Content type | Directory | Description |
 |---|---|---|
-| Research | `/home/tvd/dev/tvdavies/docs/Research/` | Notes, articles, findings, technology deep-dives, reading summaries |
-| Projects | `/home/tvd/dev/tvdavies/docs/Projects/` | Project ideas, specs, technical designs, implementation docs |
-| Plans | `/home/tvd/dev/tvdavies/docs/Plans/` | Roadmaps, goals, OKRs, strategic planning, decision records |
-| Archive | `/home/tvd/dev/tvdavies/docs/Archive/` | Completed or inactive items moved from other directories |
-| Templates | `/home/tvd/dev/tvdavies/docs/Templates/` | Reusable note templates (managed separately, not for direct content) |
+| Research | `$DOCS_VAULT_PATH/Research/` | Notes, articles, findings, technology deep-dives, reading summaries |
+| Projects | `$DOCS_VAULT_PATH/Projects/` | Project ideas, specs, technical designs, implementation docs |
+| Plans | `$DOCS_VAULT_PATH/Plans/` | Roadmaps, goals, OKRs, strategic planning, decision records |
+| Archive | `$DOCS_VAULT_PATH/Archive/` | Completed or inactive items moved from other directories |
+| Templates | `$DOCS_VAULT_PATH/Templates/` | Reusable note templates (managed separately, not for direct content) |
 
 If the content doesn't clearly fit one category, default to **Research**.
 
@@ -157,7 +163,7 @@ The vault is a git repository. Follow this workflow for every write operation:
 ### Before Writing
 
 ```bash
-git -C /home/tvd/dev/tvdavies/docs pull --rebase
+git -C $DOCS_VAULT_PATH pull --rebase
 ```
 
 Always pull with rebase before making changes to avoid unnecessary merge commits.
@@ -165,9 +171,9 @@ Always pull with rebase before making changes to avoid unnecessary merge commits
 ### After Writing
 
 ```bash
-git -C /home/tvd/dev/tvdavies/docs add <absolute-path-to-file>
-git -C /home/tvd/dev/tvdavies/docs commit -m "docs: <action> <note-name>"
-git -C /home/tvd/dev/tvdavies/docs push
+git -C $DOCS_VAULT_PATH add <absolute-path-to-file>
+git -C $DOCS_VAULT_PATH commit -m "docs: <action> <note-name>"
+git -C $DOCS_VAULT_PATH push
 ```
 
 **Commit message format:** `docs: <action> <note-name>`
@@ -192,7 +198,7 @@ If `git pull --rebase` encounters conflicts:
 
 1. For **content conflicts** (body text): accept both changes (`<<<<<<< HEAD` and incoming).
 2. For **frontmatter conflicts**: prefer the incoming (remote) version to preserve external edits.
-3. After resolving, continue the rebase with `git -C /home/tvd/dev/tvdavies/docs rebase --continue`.
+3. After resolving, continue the rebase with `git -C $DOCS_VAULT_PATH rebase --continue`.
 
 ## Updating Existing Notes
 
@@ -211,14 +217,14 @@ When the user asks to update or edit an existing note:
 When the user asks to archive a note:
 
 1. **Read** the note from its current location.
-2. **Move** it to `/home/tvd/dev/tvdavies/docs/Archive/` by writing it to the new path and deleting the old file.
+2. **Move** it to `$DOCS_VAULT_PATH/Archive/` by writing it to the new path and deleting the old file.
 3. **Update frontmatter:**
    - Set `status: archived`
    - Add `archived_date: YYYY-MM-DD` with today's date
    - Add `original_path` with the directory it came from (e.g. `Research/`)
 4. **Stage both** the deletion and the new file:
    ```bash
-   git -C /home/tvd/dev/tvdavies/docs add <old-path> <new-path>
+   git -C $DOCS_VAULT_PATH add <old-path> <new-path>
    ```
 5. **Commit** with `docs: archive <note-name>`.
 
