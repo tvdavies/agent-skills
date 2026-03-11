@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/_check-deps.sh"
 
 # quick-create: Create a Linear issue with common defaults
 # Usage: quick-create.sh [OPTIONS] [TEAM] "Title"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/_check-deps.sh"
 
 # finish-issue: Mark the current branch's issue as Done
 # Detects the issue from the git branch name, or accepts an explicit ID

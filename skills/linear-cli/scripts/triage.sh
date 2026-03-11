@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/_check-deps.sh"
 
 # triage: Show untriaged/unassigned issues for a team
 # Usage: triage.sh [OPTIONS] TEAM

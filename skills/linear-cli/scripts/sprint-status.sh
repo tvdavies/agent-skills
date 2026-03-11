@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/_check-deps.sh"
 
 # sprint-status: Show current sprint progress and remaining work
 # Usage: sprint-status.sh [OPTIONS] TEAM

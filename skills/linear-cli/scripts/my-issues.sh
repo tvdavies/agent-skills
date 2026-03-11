@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/_check-deps.sh"
 
 # my-issues: Show MY assigned issues, defaulting to current cycle
 # Usage: my-issues.sh [OPTIONS] [TEAM]

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/_check-deps.sh"
 
 # start-issue: Start working on a Linear issue
 # Sets status to In Progress, assigns to you, and checks out the git branch

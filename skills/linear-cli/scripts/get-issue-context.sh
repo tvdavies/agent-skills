@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/_check-deps.sh"
 
 # get-issue-context: Extract all contextual media from a Linear issue
 # Downloads images, Loom video frames (at best available resolution), and transcripts.
