@@ -2,7 +2,7 @@
 set -euo pipefail
 source "$(dirname "$0")/_check-deps.sh"
 
-# my-issues: Show MY assigned issues, defaulting to current cycle
+# my-issues: Show MY assigned issues via GraphQL (bypasses broken CLI flags)
 # Usage: my-issues.sh [OPTIONS] [TEAM]
 #   --all        Show all my open issues, not just current cycle
 #   --json       Output as JSON (for agent consumption)
@@ -41,88 +41,128 @@ if [ -z "$TEAM" ]; then
     TEAM="$DEFAULT_TEAM"
 fi
 
-if [ "$SHOW_ALL" = true ]; then
-    # Show all my open issues (no cycle filter)
-    if [ "$JSON_OUTPUT" = true ]; then
-        linear-cli issues list --mine -t "$TEAM" \
-            --filter "state.type!=completed" --filter "state.type!=cancelled" \
-            --output json --compact --no-pager --quiet
-    else
-        linear-cli issues list --mine -t "$TEAM" \
-            --filter "state.type!=completed" --filter "state.type!=cancelled" \
-            --group-by state --no-pager --quiet
-    fi
-else
-    # Show my issues in the current cycle only
-    # 1. Get current cycle issue identifiers
-    # 2. Get my issues
-    # 3. Intersect
-    python3 - "$TEAM" "$JSON_OUTPUT" << 'PYEOF'
+python3 - "$TEAM" "$JSON_OUTPUT" "$SHOW_ALL" << 'PYEOF'
 import subprocess, json, sys
 
 team = sys.argv[1]
 json_output = sys.argv[2] == "true"
-common = ["--output", "json", "--compact", "--no-pager", "--quiet"]
+show_all = sys.argv[3] == "true"
+CLOSED_STATES = {"Done", "Canceled", "Cancelled", "Duplicate"}
 
-# Get current cycle issues
-try:
+def gql(query):
     r = subprocess.run(
-        ["linear-cli", "cycles", "current", "-t", team] + common,
+        ["linear-cli", "api", "query", query,
+         "--output", "json", "--compact", "--no-pager", "--quiet"],
         capture_output=True, text=True, timeout=30
     )
-    cycle_data = json.loads(r.stdout)
-    cycle = cycle_data.get("activeCycle", {})
-    cycle_issues = cycle.get("issues", {}).get("nodes", [])
-    cycle_ids = {i["identifier"] for i in cycle_issues}
-    cycle_name = cycle.get("name", "Current cycle")
-    cycle_ends = cycle.get("endsAt", "")
-except Exception as e:
-    print(f"Error getting cycle: {e}", file=sys.stderr)
-    sys.exit(1)
+    if r.returncode != 0:
+        print(f"GraphQL error: {r.stderr or r.stdout}", file=sys.stderr)
+        sys.exit(1)
+    return json.loads(r.stdout).get("data", {})
 
-if not cycle_ids:
-    print("No active cycle found." if not json_output else "[]")
-    sys.exit(0)
+if show_all:
+    # All open issues across the team (no cycle filter)
+    data = gql("""
+    {
+      viewer {
+        name
+        assignedIssues(
+          filter: {
+            team: { key: { eq: "%s" } }
+            state: { type: { nin: ["completed", "canceled"] } }
+          }
+          first: 100
+          orderBy: updatedAt
+        ) {
+          nodes {
+            identifier
+            title
+            priority
+            state { name }
+            project { name }
+            labels { nodes { name } }
+          }
+        }
+      }
+    }
+    """ % team)
+    issues = data.get("viewer", {}).get("assignedIssues", {}).get("nodes", [])
+    heading = f"All open issues ({team})"
+else:
+    # Current cycle issues
+    data = gql("""
+    {
+      viewer {
+        name
+        assignedIssues(
+          filter: {
+            cycle: { isActive: { eq: true } }
+            team: { key: { eq: "%s" } }
+          }
+          first: 100
+          orderBy: updatedAt
+        ) {
+          nodes {
+            identifier
+            title
+            priority
+            state { name }
+            project { name }
+            labels { nodes { name } }
+          }
+        }
+      }
+    }
+    """ % team)
+    issues = data.get("viewer", {}).get("assignedIssues", {}).get("nodes", [])
 
-# Get my issues
-try:
-    r = subprocess.run(
-        ["linear-cli", "issues", "list", "--mine", "-t", team,
-         "--filter", "state.type!=completed", "--filter", "state.type!=cancelled"] + common,
-        capture_output=True, text=True, timeout=30
-    )
-    my_issues = json.loads(r.stdout) if r.stdout.strip() else []
-except Exception as e:
-    print(f"Error getting my issues: {e}", file=sys.stderr)
-    sys.exit(1)
-
-# Intersect: my issues that are in the current cycle
-my_cycle_issues = [i for i in my_issues if i.get("identifier") in cycle_ids]
+    # Also get cycle metadata
+    cycle_data = gql("""
+    {
+      teams(filter: { key: { eq: "%s" } }) {
+        nodes {
+          activeCycle { number startsAt endsAt }
+        }
+      }
+    }
+    """ % team)
+    cycle = (cycle_data.get("teams", {}).get("nodes", [{}])[0] or {}).get("activeCycle", {})
+    cycle_num = cycle.get("number", "?")
+    cycle_ends = (cycle.get("endsAt") or "")[:10]
+    heading = f"Sprint {cycle_num} ({team}) — ends {cycle_ends}"
 
 if json_output:
-    print(json.dumps(my_cycle_issues, indent=2))
-else:
-    if not my_cycle_issues:
-        print(f"No issues assigned to you in the current cycle ({team}).")
-        # Show cycle summary anyway
-        total = len(cycle_issues)
-        done = sum(1 for i in cycle_issues if i.get("state", {}).get("type") == "completed")
-        print(f"Cycle has {total} total issues ({done} completed).")
-    else:
-        # Group by state
-        by_state = {}
-        for i in my_cycle_issues:
-            state = i.get("state", {}).get("name", "Unknown")
-            by_state.setdefault(state, []).append(i)
+    print(json.dumps(issues))
+    sys.exit(0)
 
-        print(f"My issues in current cycle ({team}) — {len(my_cycle_issues)} total:")
-        print()
-        for state, issues in by_state.items():
-            print(f"  {state} ({len(issues)}):")
-            for i in issues:
-                priority = i.get("priority", 0)
-                p_marker = {1: "🔴", 2: "🟠", 3: "🟡", 4: "🔵"}.get(priority, "  ")
-                print(f"    {p_marker} {i['identifier']}: {i['title']}")
-            print()
+if not issues:
+    print(f"No issues assigned to you ({team}).")
+    sys.exit(0)
+
+# Group by state
+by_state = {}
+for i in issues:
+    state = i.get("state", {}).get("name", "Unknown")
+    by_state.setdefault(state, []).append(i)
+
+state_order = ["In Progress", "Technical Review", "To Do", "Backlog", "Triage", "Done", "Canceled", "Duplicate"]
+sorted_states = sorted(by_state.keys(), key=lambda s: state_order.index(s) if s in state_order else 99)
+
+done_count = sum(len(v) for k, v in by_state.items() if k in CLOSED_STATES)
+open_count = len(issues) - done_count
+
+print(f"{heading} — {open_count} open, {done_count} done")
+print()
+for state in sorted_states:
+    items = by_state[state]
+    print(f"  {state} ({len(items)}):")
+    for i in items:
+        priority = i.get("priority", 0)
+        p_marker = {1: "!!!", 2: "!!", 3: "!", 4: "."}.get(priority, " ")
+        project = i.get("project")
+        project_name = f" [{project['name']}]" if project else ""
+        labels = [l["name"] for l in i.get("labels", {}).get("nodes", [])]
+        label_str = f" ({', '.join(labels)})" if labels else ""
+        print(f"    {p_marker:>3} {i['identifier']}: {i['title']}{project_name}{label_str}")
+    print()
 PYEOF
-fi
