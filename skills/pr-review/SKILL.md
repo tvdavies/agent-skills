@@ -58,7 +58,15 @@ Gather project context for sub-agents:
 
 Search the branch name for ticket ID patterns — any alphanumeric prefix followed by a number (e.g. `PROJ-1234`, `FE-42`, `fix/TEAM-567-description`). Also check recent commit messages for ticket references.
 
-If a ticket ID is found, attempt to retrieve its details using whatever project management tools are available (skills, MCP servers, CLI tools). The skill should infer the appropriate tool from context — e.g. a Linear skill, Jira MCP, GitHub Issues CLI, etc. If no tool is available to fetch ticket details, note the ticket ID in the summary but skip the ticket compliance sub-agent.
+If a ticket ID is found, retrieve its details using this discovery order:
+
+1. **Check available skills**: Look at the skills listed in the system prompt. If one matches the ticket's project management system (e.g. a Linear skill for Linear IDs, a Jira skill for Jira IDs), invoke it using the Skill tool to fetch the ticket details.
+2. **Check CLI tools**: Try common CLIs via Bash — `linear-cli issues get TICKET_ID --output json --compact --no-pager --quiet`, `jira issue view TICKET_ID`, `gh issue view NUMBER`, etc. Use `which` or `command -v` to check availability before running.
+3. **Check MCP tools**: If MCP tools for project management are available, use those.
+
+If none of these approaches succeed, note the ticket ID in the summary but skip the ticket compliance sub-agent.
+
+**Important**: The ticket details MUST be fetched here in Phase 1, not in the sub-agent. Sub-agents cannot invoke skills. Pass the fetched ticket text (title, description, acceptance criteria) directly into Sub-agent 5's prompt.
 
 ### 1.5 Categorise Files
 
