@@ -167,6 +167,36 @@ slack.sh users "query"         # search by name/email
 ```
 Output: `user_id  username  real_name  email`
 
+### Edit a Message
+```bash
+slack.sh edit <channel_id> <message_ts> "new text"
+```
+Edits an existing message. Can only edit messages sent by the authenticated user.
+
+### Delete a Message
+```bash
+slack.sh delete <channel_id> <message_ts>
+```
+Deletes a message. Can only delete messages sent by the authenticated user.
+
+### React to a Message
+```bash
+slack.sh react <channel_id> <message_ts> <emoji_name>
+```
+Adds an emoji reaction. Emoji name can be with or without colons (`:thumbsup:` or `thumbsup`).
+
+### Remove a Reaction
+```bash
+slack.sh unreact <channel_id> <message_ts> <emoji_name>
+```
+Removes an emoji reaction. Emoji name can be with or without colons.
+
+### User Info by ID
+```bash
+slack.sh userinfo <user_id>
+```
+Looks up a single user by their ID (e.g. `U06CW5QR7LK`). Returns: `user_id  username  real_name  email  title`. Useful for resolving user IDs seen in message history.
+
 ### Mark as Read
 ```bash
 slack.sh mark <channel_id>          # mark all as read

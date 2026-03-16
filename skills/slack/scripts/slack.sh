@@ -214,6 +214,65 @@ cmd_unreads() {
   fi
 }
 
+cmd_edit() {
+  local channel="${1:?Usage: slack.sh edit <channel_id> <timestamp> <new_text>}"
+  local ts="${2:?Usage: slack.sh edit <channel_id> <timestamp> <new_text>}"
+  local text="${3:?Usage: slack.sh edit <channel_id> <timestamp> <new_text>}"
+
+  local resp
+  resp=$(slack_post "chat.update" -d "$(jq -n --arg ch "$channel" --arg ts "$ts" --arg txt "$text" '{channel: $ch, ts: $ts, text: $txt}')")
+  check_error "$resp"
+  echo "$resp" | jq '{ok: .ok, channel: .channel, ts: .ts}'
+}
+
+cmd_delete() {
+  local channel="${1:?Usage: slack.sh delete <channel_id> <timestamp>}"
+  local ts="${2:?Usage: slack.sh delete <channel_id> <timestamp>}"
+
+  local resp
+  resp=$(slack_post "chat.delete" -d "$(jq -n --arg ch "$channel" --arg ts "$ts" '{channel: $ch, ts: $ts}')")
+  check_error "$resp"
+  echo "Deleted message $ts from $channel"
+}
+
+cmd_unreact() {
+  local channel="${1:?Usage: slack.sh unreact <channel_id> <timestamp> <emoji_name>}"
+  local ts="${2:?Usage: slack.sh unreact <channel_id> <timestamp> <emoji_name>}"
+  local emoji="${3:?Usage: slack.sh unreact <channel_id> <timestamp> <emoji_name>}"
+
+  emoji="${emoji#:}"
+  emoji="${emoji%:}"
+
+  local resp
+  resp=$(slack_post "reactions.remove" -d "$(jq -n --arg ch "$channel" --arg ts "$ts" --arg name "$emoji" '{channel: $ch, timestamp: $ts, name: $name}')")
+  check_error "$resp"
+  echo "Removed :$emoji: from $channel @ $ts"
+}
+
+cmd_userinfo() {
+  local user_id="${1:?Usage: slack.sh userinfo <user_id>}"
+
+  local resp
+  resp=$(slack_api "users.info" -d "user=$user_id")
+  check_error "$resp"
+  echo "$resp" | jq -r '.user | "\(.id)\t\(.name)\t\(.real_name // "-")\t\(.profile.email // "-")\t\(.profile.title // "-")"'
+}
+
+cmd_react() {
+  local channel="${1:?Usage: slack.sh react <channel_id> <timestamp> <emoji_name>}"
+  local ts="${2:?Usage: slack.sh react <channel_id> <timestamp> <emoji_name>}"
+  local emoji="${3:?Usage: slack.sh react <channel_id> <timestamp> <emoji_name>}"
+
+  # Strip colons if provided (e.g. :thumbsup: -> thumbsup)
+  emoji="${emoji#:}"
+  emoji="${emoji%:}"
+
+  local resp
+  resp=$(slack_post "reactions.add" -d "$(jq -n --arg ch "$channel" --arg ts "$ts" --arg name "$emoji" '{channel: $ch, timestamp: $ts, name: $name}')")
+  check_error "$resp"
+  echo "Added :$emoji: to $channel @ $ts"
+}
+
 cmd_resolve_channel() {
   # Helper: resolve #name or @user to channel ID
   local input="${1:?Usage: slack.sh resolve <#channel|@user|channel_id>}"
@@ -272,6 +331,11 @@ Commands:
   mark <channel> [ts]               Mark channel as read
   groups                            List user groups
   unreads [type]                    Show channels with unread messages
+  edit <channel> <ts> <new_text>     Edit a message
+  delete <channel> <ts>             Delete a message
+  react <channel> <ts> <emoji>      Add emoji reaction to a message
+  unreact <channel> <ts> <emoji>    Remove emoji reaction from a message
+  userinfo <user_id>                Get user details by ID
   resolve <#channel|@user|id>       Resolve name to channel ID
 
 Channel can be an ID (C...) or use 'resolve' first to convert #name/@user.
@@ -289,6 +353,11 @@ case "${1:-}" in
   mark)     shift; cmd_mark "$@" ;;
   groups)   shift; cmd_groups "$@" ;;
   unreads)  shift; cmd_unreads "$@" ;;
+  edit)     shift; cmd_edit "$@" ;;
+  delete)   shift; cmd_delete "$@" ;;
+  react)    shift; cmd_react "$@" ;;
+  unreact)  shift; cmd_unreact "$@" ;;
+  userinfo) shift; cmd_userinfo "$@" ;;
   resolve)  shift; cmd_resolve_channel "$@" ;;
   help|--help|-h|"") usage ;;
   *) echo "Unknown command: $1" >&2; usage >&2; exit 1 ;;
