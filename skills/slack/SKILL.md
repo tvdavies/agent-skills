@@ -13,6 +13,7 @@ Interact with Slack using `scripts/slack.sh` (calls Slack API directly via `SLAC
 ## Important: Agent Conventions
 
 - Always resolve `#channel-name` or `@username` to a channel ID first using `slack.sh resolve <name>` before passing to other commands.
+- **Never guess user identities from IDs.** Always resolve user IDs to names using `slack.sh userinfo <user_id>` before attributing messages to anyone. Do not assume a user ID belongs to a particular person — look it up every time.
 - When displaying messages to the user, format them readably with timestamps, usernames, and content.
 - For sending messages, always confirm with the user before executing `slack.sh send`.
 - Channel IDs look like `C...` (channels), `D...` (DMs), `G...` (group DMs/private channels).
@@ -89,7 +90,7 @@ When drafting or sending messages as Tom, follow these rules to match his authen
 
 **DMs / Group DMs**: More informal — "lol", "hey ho" (resignation/acceptance). Stream-of-consciousness thinking across multiple messages. Comfortable thinking out loud: "I'm trying to explain what I want", "I keep going around in circles on this!" Quick back-and-forth with single-word or 2-3 word messages.
 
-**PR / Bug channels**: Factual and terse. "There is a unit test failing. Added a review." For new PRs: `ticket-id: short description\n<link>`. Ping specific people with `:rotating_light:` for urgent reviews.
+**PR / Bug channels**: Factual and terse. "There is a unit test failing. Added a review." For new PRs and PR reactions, follow the conventions in `references/pull-requests.md`. Ping specific people with `:rotating_light:` for urgent reviews.
 
 **Raising process/team concerns**: Frame diplomatically. State the problem, give reasoning, propose solution. Use "I think we need..." not demands. Acknowledge others' efforts while being direct about the issue.
 
@@ -117,6 +118,12 @@ When drafting or sending messages as Tom, follow these rules to match his authen
 - "When you get a mo, ..." — casual request softener
 - "I'm not trying to point fingers" — diplomatic framing before a concern
 - "I think that's the starting point. And then we see what's really needed on top of that." — pragmatic wrap-up
+
+## Reference Files
+
+Channel-specific conventions are documented in `references/`. Consult these when working with the relevant channel:
+
+- **`references/pull-requests.md`** — PR posting format, review reaction conventions, and tagging rules for `#pull-requests`
 
 ## Commands Reference
 
