@@ -34,23 +34,23 @@ Issues that MUST be fixed before merge:
 
 ### SHOULD_FIX (confidence 80-89)
 
-Issues that SHOULD be addressed but are not blockers:
+Issues that would cause a real problem in production, create meaningful confusion for the next developer, or represent a correctness risk:
 
-- Pattern inconsistencies with the codebase
-- Code quality issues (poor naming, unclear logic, missing error handling)
 - Missing input validation at system boundaries
 - Performance issues that affect user experience
-- Test quality problems (brittle tests, missing edge cases)
+- Error handling gaps that would cause silent failures or data loss
+- Logic errors or correctness risks in business-critical paths
+- Tests that give false confidence (assertions that always pass, testing the wrong thing)
 
 ### SUGGESTION (explicitly marked)
 
-Optional improvements — nice to have:
+Things the author would genuinely thank you for pointing out. If you wouldn't mention it in a real code review with a colleague, don't include it.
 
-- Minor style preferences
-- Alternative approaches that might be cleaner
-- Opportunities for reuse or simplification
-- Documentation improvements
+- Alternative approaches that are meaningfully cleaner (not just different)
+- Opportunities for reuse or simplification that save real effort
 - Scope creep (work beyond what the ticket requires)
+
+Each agent may report at most 3 suggestions. If you have more, keep only the most useful ones.
 
 Suggestions should always be marked with `severity: SUGGESTION` regardless of confidence score.
 
@@ -76,12 +76,12 @@ Review the changed code and any surrounding context necessary to evaluate its co
 
 ## Completeness Rule
 
-After reviewing, list every changed file with either your findings or "No issues found." This ensures completeness in a single pass. Use this format at the end of your response:
+After reviewing, list the files you reviewed. For files with findings, include the count. Files without findings need only be listed — no need to explicitly say "no issues found" for each one.
 
 ```
 ## Files Reviewed
 - path/to/changed-file-1.ts: 2 findings (1 CRITICAL, 1 SHOULD_FIX)
-- path/to/changed-file-2.ts: No issues found
+- path/to/changed-file-2.ts
 - path/to/changed-file-3.tsx: 1 finding (1 SUGGESTION)
 ```
 
@@ -120,3 +120,13 @@ agent: standards
 ```
 
 Problems: confidence below 80, vague description, no specific line range, no concrete fix, pre-existing code not changed in the PR.
+
+### Not a Finding (do NOT report these)
+
+- A missing test for a trivial early-return or guard clause
+- A useEffect/useMemo dependency that is slightly broader than necessary but causes no harm
+- A type that could be narrower but is correct as-is
+- An approach that works correctly but could use a different pattern
+- Style preferences not covered by the project's linter or CLAUDE.md
+- Theoretical issues requiring multiple unlikely conditions to manifest
+- Minor naming preferences when the current names are clear enough

@@ -96,10 +96,9 @@ Read `references/finding-format.md` and include its contents in every sub-agent 
 **Task tool config:** `subagent_type: "general-purpose"`, `model: "sonnet"`
 
 Prompt focus:
-- CLAUDE.md rule compliance (naming conventions, import patterns, file structure, British English)
-- Code style consistency (formatting, naming, export patterns)
+- Check whether the code follows project conventions from CLAUDE.md (naming, imports, file structure, British English)
+- Only flag deviations that would cause real confusion or maintenance burden — not minor stylistic preferences
 - Type safety (no `any` casts, proper type usage, `type` vs `interface`)
-- Import patterns (alias usage, no relative imports where aliases expected)
 - Only flag issues in changed lines, not pre-existing code
 
 ### Sub-agent 2: Security and Performance
@@ -127,12 +126,11 @@ Security findings default to CRITICAL severity.
 **Task tool config:** `subagent_type: "general-purpose"`, `model: "opus"`
 
 Prompt focus:
-- Pattern consistency with the existing codebase (sub-agent MUST search for comparable code using Grep/Glob before flagging inconsistencies)
-- Appropriate abstractions and module boundaries
-- Error handling patterns (consistent with project conventions)
-- Duplicate functionality detection (search if similar utility already exists)
-- Service communication patterns (APIs, RPC, message queues — whatever the project uses)
-- Database access patterns (ORM usage, transaction boundaries, query patterns)
+- Assess whether the approach is sound — does the architecture make sense for what the PR is trying to do?
+- Sub-agent MUST search for comparable code using Grep/Glob before flagging any inconsistency
+- Only flag pattern deviations that would cause actual confusion or bugs, not stylistic differences
+- Check for duplicate functionality (search if similar utility already exists)
+- Evaluate error handling, service communication, and database access patterns for correctness
 
 Scoping: The sub-agent may read unchanged files to understand context, but must only flag issues the PR creates or worsens.
 
@@ -143,11 +141,10 @@ Scoping: The sub-agent may read unchanged files to understand context, but must 
 **Task tool config:** `subagent_type: "general-purpose"`, `model: "sonnet"`
 
 Prompt focus:
-- Untested error handling paths and edge cases
-- Missing negative tests (what happens when things fail?)
+- Are the tests sufficient to have confidence in this change?
+- Missing negative tests for important failure modes (not trivial guard clauses)
 - Brittle tests that test implementation details rather than behaviour
-- Test data quality (realistic scenarios vs trivial mocks)
-- Rate test criticality 1-10 for each finding
+- Tests that give false confidence (assertions that always pass, testing the wrong thing)
 
 ### Sub-agent 5: Ticket Compliance
 
@@ -178,9 +175,21 @@ Report a table with PASS / FAIL / NOT AVAILABLE for each check. For failures, in
 
 Include these instructions verbatim in every sub-agent prompt:
 
-Follow the finding format from the specification exactly. Only report findings with confidence at or above 80. After reviewing, list every changed file and confirm "no issues" for clean files. If you find nothing noteworthy, say so clearly. Do NOT manufacture findings to justify your existence. An empty category is a good sign, not a failure.
+Your job is to assess whether this code is ready to merge. The expected answer is yes — most PRs are fine. You are not looking for things to criticise; you are looking for reasons to block or genuinely useful improvements.
 
-Before reporting any CRITICAL or SHOULD_FIX finding, verify the full execution path — read the surrounding code (not just the diff) to confirm that no existing guard, fallback, or handler already addresses the concern. If the issue is about a code path ("X could happen"), trace it to confirm it is actually reachable. A false positive at high severity is worse than a missed suggestion.
+CRITICAL and SHOULD_FIX = things that would make you block this PR in a real code review. These must be verified — read the surrounding code (not just the diff) to confirm that no existing guard, fallback, or handler already addresses the concern. If the issue is about a code path ("X could happen"), trace it to confirm it is actually reachable. A false positive at high severity is worse than a missed suggestion.
+
+SUGGESTION = things the author would genuinely thank you for pointing out. Maximum 3 suggestions per agent. If you have more, keep only the most useful ones.
+
+These are NOT findings — do not report them:
+- Missing tests for trivial branches, early returns, or guard clauses
+- Slightly broad hook dependencies (useEffect, useMemo) that cause harmless no-ops
+- Theoretical edge cases that require multiple unlikely conditions to manifest
+- Stylistic preferences when the current approach works correctly
+- Types that could be narrower but are correct as-is
+- An approach that works but could use a different pattern
+
+Follow the finding format from the specification exactly. Only report findings with confidence at or above 80. List the files you reviewed — for files with findings, include the count; files without findings need only be listed. If you find nothing noteworthy, say so clearly. Do NOT manufacture findings to justify your existence. An empty category is a good sign, not a failure.
 
 ## Phase 3: Synthesise
 
@@ -193,59 +202,68 @@ If multiple agents flag the same file + line range:
 - Use the highest severity from the duplicates
 - Note which agents independently identified the issue (increases confidence)
 
-### 3.2 Cross-reference with Build
+### 3.2 Filter Noise
+
+Before cross-referencing with build, filter out low-value findings:
+- Drop findings that are stylistic preferences when the current approach is correct
+- Drop findings about theoretical edge cases that require multiple unlikely conditions
+- Drop findings about test coverage for trivial code paths (early returns, guard clauses)
+- Cap total suggestions at 3 across all agents — keep the most useful ones
+- If no CRITICAL or SHOULD_FIX findings remain after filtering, keep the final output short
+
+### 3.3 Cross-reference with Build
 
 If build validation found type-check or lint failures:
 - Link errors to related findings from other agents
 - Elevate related findings if they explain the failure
 - Add build context to the finding description
 
-### 3.3 Sort and Prioritise
+### 3.4 Sort and Prioritise
 
 Order findings by severity, then by confidence:
 1. **CRITICAL** (confidence 90-100): Must fix before merge
 2. **SHOULD_FIX** (confidence 80-89): Important, should address
 3. **SUGGESTION** (explicitly marked): Optional improvements
 
-### 3.4 Count Totals
+### 3.5 Count Totals
 
 Calculate totals per severity for the summary section.
 
-### 3.5 Identify Positives
+### 3.6 Identify Positives
 
-Note things done well:
-- Good test coverage for complex logic
-- Proper error handling patterns
-- Clean separation of concerns
-- Effective use of existing utilities
-- Security best practices followed
+Only note genuinely notable things — skip this section entirely if nothing stands out. Do not pad with generic praise like "good error handling" or "clean code."
 
 ## Phase 4: Present
 
 ### Default: Conversational Output
 
-Present a structured summary:
+Present a structured summary. The output length should match the severity of the findings — clean PRs get short reviews.
 
-1. **Verdict**: One of APPROVE / APPROVE_WITH_SUGGESTIONS / REQUEST_CHANGES
-   - APPROVE: No critical or should-fix findings
-   - APPROVE_WITH_SUGGESTIONS: Only suggestions, no blockers
-   - REQUEST_CHANGES: At least one critical or should-fix finding
+**For APPROVE verdict** (no critical or should-fix findings):
 
-2. **Summary**: 2-3 sentences covering what the PR does and overall quality assessment
+1. **Verdict**: APPROVE
+2. **Summary**: 2-3 sentences on what the PR does and that it looks good
+3. **Build Status**: Table of type-check and lint results
+4. **What's Good** (optional): Only if something is genuinely notable — skip if nothing stands out
+5. **Files Reviewed**: Collapsible list
 
-3. **Build Status**: Table of type-check and lint results (only in conversational output — omit from GitHub comments since CI covers this)
+**For APPROVE_WITH_SUGGESTIONS** (only suggestions, no blockers):
 
+1. **Verdict**: APPROVE_WITH_SUGGESTIONS
+2. **Summary**: 2-3 sentences
+3. **Build Status**: Table of type-check and lint results
+4. **Suggestions**: Max 3 items, each with file/line, what, why, fix
+5. **Files Reviewed**: Collapsible list
+
+**For REQUEST_CHANGES** (at least one critical or should-fix finding):
+
+1. **Verdict**: REQUEST_CHANGES
+2. **Summary**: 2-3 sentences
+3. **Build Status**: Table of type-check and lint results
 4. **Ticket Compliance** (if applicable): Brief assessment of requirement coverage
-
-5. **Findings by Severity**: Grouped sections, each finding with:
-   - File and line reference
-   - What the issue is
-   - Why it matters
-   - Suggested fix
-
-6. **What's Good**: Positive observations (keep brief, 2-4 bullet points)
-
-7. **Files Reviewed**: Complete list of reviewed files
+5. **Findings by Severity**: Grouped sections, each finding with file/line, what, why, fix
+6. **Suggestions** (if any, max 3)
+7. **Files Reviewed**: Collapsible list
 
 ### GitHub Output (--post flag)
 

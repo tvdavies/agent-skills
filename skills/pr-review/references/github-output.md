@@ -2,12 +2,74 @@
 
 This document defines the template and formatting rules for posting PR review results as a GitHub comment. Only load this file when the user requests posting to GitHub (via `--post` flag or "post to PR" / "post to GitHub").
 
-## Report Template
+## Report Templates
 
-Use this exact structure for the GitHub comment. Write the complete markdown to `/tmp/pr-review.md` before posting.
+Write the complete markdown to `/tmp/pr-review.md` before posting. Use the appropriate template based on the verdict.
+
+### APPROVE Template
+
+For clean PRs with no findings or only minor positives. Keep it short.
 
 ```markdown
-## {VERDICT_BADGE} PR Review
+## ✅ Approved
+
+**{COMMIT_COUNT}** commits | **{FILE_COUNT}** files changed | **{ADDITIONS}** additions | **{DELETIONS}** deletions
+
+{SUMMARY — 2-3 sentences. Focus on what the PR does well, not what it doesn't do wrong.}
+
+<details>
+<summary>Files Reviewed ({TOTAL_FILE_COUNT})</summary>
+
+{FILE_LIST}
+
+</details>
+
+---
+
+*Automated review by pr-review skill*
+```
+
+No findings sections, no "What's Good" padding, no build status (CI covers that).
+
+### APPROVE_WITH_SUGGESTIONS Template
+
+Same condensed format but with a visible suggestions section (max 3 items, not collapsible — they should be visible since they're genuinely useful).
+
+```markdown
+## 🔵 Approved with Suggestions
+
+**{COMMIT_COUNT}** commits | **{FILE_COUNT}** files changed | **{ADDITIONS}** additions | **{DELETIONS}** deletions
+
+{SUMMARY — 2-3 sentences}
+
+---
+
+### 🔵 Suggestions
+
+{SUGGESTION_1}
+
+{SUGGESTION_2}
+
+{SUGGESTION_3 — max 3 total}
+
+<details>
+<summary>Files Reviewed ({TOTAL_FILE_COUNT})</summary>
+
+{FILE_LIST}
+
+</details>
+
+---
+
+*Automated review by pr-review skill*
+```
+
+### REQUEST_CHANGES Template
+
+Full output with all severity sections.
+
+```markdown
+## 🔴 Changes Requested
 
 **{COMMIT_COUNT}** commits | **{FILE_COUNT}** files changed | **{ADDITIONS}** additions | **{DELETIONS}** deletions
 
@@ -21,11 +83,7 @@ Use this exact structure for the GitHub comment. Write the complete markdown to 
 
 {SHOULD_FIX_SECTION — only if should-fix findings exist}
 
-{SUGGESTION_SECTION — only if suggestion findings exist}
-
-### What's Good
-
-{POSITIVES — bullet points of things done well}
+{SUGGESTION_SECTION — only if suggestion findings exist, max 3}
 
 <details>
 <summary>Files Reviewed ({TOTAL_FILE_COUNT})</summary>
@@ -136,11 +194,11 @@ Each severity tier is a collapsible section with a count in the summary line. On
 
 ## Files Reviewed List
 
-Inside the collapsible files section, list each file with its finding count:
+Inside the collapsible files section, list each file. Only annotate files that have findings:
 
 ```markdown
 - `path/to/file.ts` — 🔴 1 Critical, 🟠 1 Should Fix
-- `path/to/other-file.tsx` — ✅ No issues
+- `path/to/other-file.tsx`
 - `path/to/test-file.test.ts` — 🔵 1 Suggestion
 ```
 
