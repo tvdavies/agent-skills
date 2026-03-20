@@ -31,19 +31,35 @@ Fallback to `main` if the command fails. Allow override via `--base` argument.
 
 ### 1.2 Gather Changes
 
-Determine the diff range:
-- Default: `BASE_BRANCH...HEAD`
-- If `--since COMMIT_SHA` provided: `COMMIT_SHA...HEAD`
+**Always fetch the base branch from the remote before diffing** to avoid stale merge-base issues where already-merged commits appear in the diff:
 
-Run these commands (replace BASE_BRANCH and RANGE with actual values):
+```bash
+git fetch origin BASE_BRANCH
+```
+
+Determine the diff range. When reviewing a PR by number, also fetch the PR's head branch:
+
+```bash
+# Fetch PR head branch (when reviewing by PR number)
+git fetch origin PR_HEAD_BRANCH
+
+# Diff range uses origin/ refs to ensure freshness:
+# - Default (on the branch locally): origin/BASE_BRANCH...HEAD
+# - Remote PR review (by number):    origin/BASE_BRANCH...origin/PR_HEAD_BRANCH
+# - Incremental (--since):           COMMIT_SHA...HEAD (or ...origin/PR_HEAD_BRANCH)
+```
+
+Run these commands (replace RANGE with the resolved diff range):
 ```bash
 git diff RANGE --name-only          # Changed files list
-git log BASE_BRANCH..HEAD --oneline # Commit history
+git log RANGE --oneline             # Commit history
 git diff RANGE --stat               # Change statistics
 git diff RANGE                      # Full diff (for sub-agents)
 ```
 
 If no changes found, inform the user and stop.
+
+**Important:** Never use a bare local branch name (e.g. `main`) in the diff range — always use `origin/BASE_BRANCH` to ensure you are comparing against the latest remote state. Using a stale local ref will include already-merged commits in the diff, leading to a review of code that is not part of the PR.
 
 ### 1.3 Detect Repo Context
 
