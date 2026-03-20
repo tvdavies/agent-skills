@@ -289,9 +289,13 @@ When the user requests posting to GitHub:
 2. Format the synthesised findings into body markdown and write to `/tmp/pr-review.md`
 3. For each CRITICAL and SHOULD_FIX finding, format an inline comment using the inline comment template from `references/github-output.md` and collect into `/tmp/pr-review-inline.json`. SUGGESTION findings do NOT get inline comments.
 4. Map the verdict to a review event (see event mapping table in `references/github-output.md`)
-5. Post via: `bash /path/to/skill/scripts/post-review.sh --body /tmp/pr-review.md --inline /tmp/pr-review-inline.json --event EVENT` (run from the repo root so `gh pr view` can detect the PR; use the skill's base directory path for the script)
+5. Post via: `bash /path/to/skill/scripts/post-review.sh --body /tmp/pr-review.md --inline /tmp/pr-review-inline.json --event EVENT --pr PR_NUMBER` (use the skill's base directory path for the script)
+
+**Important:** Always pass `--pr PR_NUMBER` to target the correct PR explicitly. Do not rely on auto-detection from the current branch — it can target the wrong PR when running from a worktree or detached HEAD.
 
 If updating an existing review comment, use `--edit-last` flag (inline comments are skipped on updates to avoid duplicate threads).
+
+**Never call `gh pr review` directly.** The script handles both the review body and the approval/request-changes event in a single atomic API call, preventing duplicate reviews. Calling `gh pr review` separately will create a second review.
 
 ## Incremental Re-review
 

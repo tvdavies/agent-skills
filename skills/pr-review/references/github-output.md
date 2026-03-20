@@ -408,27 +408,30 @@ Use the `post-review.sh` script for all posting. It handles body comment + inlin
 bash scripts/post-review.sh \
     --body /tmp/pr-review.md \
     --inline /tmp/pr-review-inline.json \
-    --event REQUEST_CHANGES
+    --event REQUEST_CHANGES \
+    --pr 1234
 ```
 
 ### Body only (no inline comments)
 ```bash
 bash scripts/post-review.sh \
-    --body /tmp/pr-review.md --event APPROVE
+    --body /tmp/pr-review.md --event APPROVE --pr 1234
 ```
 
 ### Update existing review comment
 ```bash
 bash scripts/post-review.sh \
-    --body /tmp/pr-review.md --edit-last
+    --body /tmp/pr-review.md --edit-last --pr 1234
 ```
 
 ### Dry run (inspect payload without posting)
 ```bash
 bash scripts/post-review.sh \
     --body /tmp/pr-review.md --inline /tmp/pr-review-inline.json \
-    --event REQUEST_CHANGES --dry-run
+    --event REQUEST_CHANGES --pr 1234 --dry-run
 ```
 
-### If no PR exists for the current branch
+**Important:** Always pass `--pr NUMBER` explicitly. Never rely on auto-detection from the current branch. Never call `gh pr review` directly — the script handles review submission atomically.
+
+### If no PR exists
 Inform the user that no PR was found and offer to create one, or just output the review conversationally.

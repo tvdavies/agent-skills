@@ -3,12 +3,13 @@
 # post-review.sh — Post PR review body comment + optional inline review comments.
 #
 # Usage:
-#   post-review.sh --body FILE [--inline FILE] [--event EVENT] [--edit-last] [--dry-run]
+#   post-review.sh --body FILE [--inline FILE] [--event EVENT] [--pr NUMBER] [--edit-last] [--dry-run]
 #
 # Arguments:
 #   --body FILE      Path to markdown file for the body comment (required)
 #   --inline FILE    Path to JSON file with inline comments (optional)
 #   --event EVENT    Review event: REQUEST_CHANGES | COMMENT | APPROVE (default: COMMENT)
+#   --pr NUMBER      Target a specific PR number (otherwise auto-detected from current branch)
 #   --edit-last      Update the most recent comment instead of posting new
 #   --dry-run        Print what would be posted without actually posting
 #
@@ -21,6 +22,7 @@ set -euo pipefail
 BODY_FILE=""
 INLINE_FILE=""
 EVENT="COMMENT"
+PR_NUMBER_ARG=""
 EDIT_LAST=false
 DRY_RUN=false
 
@@ -29,6 +31,7 @@ while [[ $# -gt 0 ]]; do
         --body)     BODY_FILE="$2"; shift 2 ;;
         --inline)   INLINE_FILE="$2"; shift 2 ;;
         --event)    EVENT="$2"; shift 2 ;;
+        --pr)       PR_NUMBER_ARG="$2"; shift 2 ;;
         --edit-last) EDIT_LAST=true; shift ;;
         --dry-run)  DRY_RUN=true; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -47,10 +50,20 @@ fi
 
 # --- Detect PR context ---
 
-PR_JSON=$(gh pr view --json number,headRefOid,url 2>/dev/null || true)
-if [[ -z "$PR_JSON" ]]; then
-    echo "Error: No open PR found for the current branch." >&2
-    exit 1
+if [[ -n "$PR_NUMBER_ARG" ]]; then
+    # Explicit PR number provided — look it up directly
+    PR_JSON=$(gh pr view "$PR_NUMBER_ARG" --json number,headRefOid,url 2>/dev/null || true)
+    if [[ -z "$PR_JSON" ]]; then
+        echo "Error: PR #${PR_NUMBER_ARG} not found." >&2
+        exit 1
+    fi
+else
+    # Auto-detect from current branch
+    PR_JSON=$(gh pr view --json number,headRefOid,url 2>/dev/null || true)
+    if [[ -z "$PR_JSON" ]]; then
+        echo "Error: No open PR found for the current branch." >&2
+        exit 1
+    fi
 fi
 
 PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
@@ -62,66 +75,57 @@ OWNER_REPO=$(echo "$PR_URL" | sed -E 's|https://github.com/([^/]+/[^/]+)/pull/[0
 
 echo "PR #${PR_NUMBER} | commit ${COMMIT_SHA:0:8} | ${OWNER_REPO}"
 
-# --- Step 1: Post body comment ---
+# --- Determine posting strategy ---
+#
+# For APPROVE and REQUEST_CHANGES, always submit a proper GitHub review so the
+# approval/request-changes state is set atomically. The body markdown becomes
+# the review body. Inline comments (if any) are included in the same review.
+#
+# For COMMENT events, post a plain issue comment (more prominent in the timeline)
+# and then submit inline comments as a separate review if present.
+#
+# This prevents the situation where the body is posted as a comment but the
+# review event is never submitted because there are no inline comments.
 
-if [[ "$DRY_RUN" == true ]]; then
-    echo ""
-    echo "=== DRY RUN: Body comment ==="
-    if [[ "$EDIT_LAST" == true ]]; then
-        echo "Would UPDATE last comment with contents of: $BODY_FILE"
-    else
-        echo "Would POST new comment with contents of: $BODY_FILE"
-    fi
-    echo "Body size: $(wc -c < "$BODY_FILE") bytes"
-else
-    if [[ "$EDIT_LAST" == true ]]; then
-        gh pr comment --edit-last --body-file "$BODY_FILE"
-        echo "Updated existing PR comment."
-    else
-        gh pr comment --body-file "$BODY_FILE"
-        echo "Posted new PR comment."
-    fi
+BODY_CONTENT=$(cat "$BODY_FILE")
+IS_REVIEW_EVENT=false
+if [[ "$EVENT" == "APPROVE" || "$EVENT" == "REQUEST_CHANGES" ]]; then
+    IS_REVIEW_EVENT=true
 fi
 
-# --- Step 2: Inline review comments ---
+# --- Step 1: Handle --edit-last ---
 
-# Skip inline comments when editing (avoid duplicate threads)
 if [[ "$EDIT_LAST" == true ]]; then
+    if [[ "$DRY_RUN" == true ]]; then
+        echo ""
+        echo "=== DRY RUN: Update last comment ==="
+        echo "Body size: $(wc -c < "$BODY_FILE") bytes"
+    else
+        gh pr comment "$PR_NUMBER" --edit-last --body-file "$BODY_FILE"
+        echo "Updated existing PR comment."
+    fi
     echo "Skipping inline comments (--edit-last mode)."
     exit 0
 fi
 
-# Skip if no inline file provided or file is empty/missing
-if [[ -z "$INLINE_FILE" ]]; then
-    exit 0
-fi
+# --- Step 2: Collect inline comments (if any) ---
 
-if [[ ! -f "$INLINE_FILE" ]]; then
-    echo "Warning: Inline file not found: $INLINE_FILE — skipping inline comments."
-    exit 0
-fi
+VALIDATED_COMMENTS="[]"
+VALID_COUNT=0
 
-COMMENT_COUNT=$(jq '.comments | length' "$INLINE_FILE" 2>/dev/null || echo "0")
-if [[ "$COMMENT_COUNT" == "0" ]]; then
-    echo "No inline comments to post."
-    exit 0
-fi
+if [[ -n "$INLINE_FILE" && -f "$INLINE_FILE" ]]; then
+    COMMENT_COUNT=$(jq '.comments | length' "$INLINE_FILE" 2>/dev/null || echo "0")
 
-echo ""
-echo "Processing ${COMMENT_COUNT} inline comment(s)..."
+    if [[ "$COMMENT_COUNT" != "0" ]]; then
+        echo ""
+        echo "Processing ${COMMENT_COUNT} inline comment(s)..."
 
-# --- Step 2a: Fetch PR diff and extract valid ranges ---
+        # Fetch PR diff and extract valid ranges
+        DIFF=$(gh api "repos/${OWNER_REPO}/pulls/${PR_NUMBER}" \
+            -H "Accept: application/vnd.github.v3.diff" 2>/dev/null || true)
 
-DIFF=$(gh api "repos/${OWNER_REPO}/pulls/${PR_NUMBER}" \
-    -H "Accept: application/vnd.github.v3.diff" 2>/dev/null || true)
-
-if [[ -z "$DIFF" ]]; then
-    echo "Warning: Could not fetch PR diff — skipping inline comments."
-    exit 0
-fi
-
-# Parse diff hunks to extract valid {file: [[start, end], ...]} ranges
-VALID_RANGES=$(echo "$DIFF" | python3 -c '
+        if [[ -n "$DIFF" ]]; then
+            VALID_RANGES=$(echo "$DIFF" | python3 -c '
 import sys, json, re
 
 diff = sys.stdin.read()
@@ -129,7 +133,6 @@ ranges = {}
 current_file = None
 
 for line in diff.split("\n"):
-    # Match diff header: +++ b/path/to/file
     m = re.match(r"^\+\+\+ b/(.+)$", line)
     if m:
         current_file = m.group(1)
@@ -137,7 +140,6 @@ for line in diff.split("\n"):
             ranges[current_file] = []
         continue
 
-    # Match hunk header: @@ -old,count +new,count @@
     m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
     if m and current_file:
         start = int(m.group(1))
@@ -148,14 +150,8 @@ for line in diff.split("\n"):
 print(json.dumps(ranges))
 ' 2>/dev/null || echo "{}")
 
-if [[ "$VALID_RANGES" == "{}" ]]; then
-    echo "Warning: Could not parse diff ranges — skipping inline comments."
-    exit 0
-fi
-
-# --- Step 2b: Validate and filter inline comments ---
-
-VALIDATED_COMMENTS=$(python3 -c "
+            if [[ "$VALID_RANGES" != "{}" ]]; then
+                VALIDATED_COMMENTS=$(python3 -c "
 import json, sys
 
 with open('$INLINE_FILE') as f:
@@ -175,7 +171,6 @@ for c in data.get('comments', []):
         skipped += 1
         continue
 
-    # Check if the end line falls within any hunk range
     in_range = False
     for r_start, r_end in ranges[path]:
         if r_start <= line <= r_end:
@@ -187,7 +182,6 @@ for c in data.get('comments', []):
         skipped += 1
         continue
 
-    # Build the comment for the API
     comment = {
         'path': path,
         'line': line,
@@ -195,7 +189,6 @@ for c in data.get('comments', []):
         'body': c['body']
     }
 
-    # Add start_line for multi-line comments if valid
     if start_line and start_line != line:
         comment['start_line'] = start_line
         comment['start_side'] = 'RIGHT'
@@ -208,51 +201,100 @@ if skipped:
 print(json.dumps(valid))
 " 2>/dev/null)
 
-VALID_COUNT=$(echo "$VALIDATED_COMMENTS" | jq 'length' 2>/dev/null || echo "0")
-
-if [[ "$VALID_COUNT" == "0" ]]; then
-    echo "No inline comments within diff range — skipping."
-    exit 0
+                VALID_COUNT=$(echo "$VALIDATED_COMMENTS" | jq 'length' 2>/dev/null || echo "0")
+                echo "${VALID_COUNT} inline comment(s) validated."
+            else
+                echo "Warning: Could not parse diff ranges — skipping inline comments."
+            fi
+        else
+            echo "Warning: Could not fetch PR diff — skipping inline comments."
+        fi
+    fi
 fi
 
-echo "${VALID_COUNT} inline comment(s) validated."
+# --- Step 3: Post ---
 
-# --- Step 2c: Build and submit review ---
+if [[ "$IS_REVIEW_EVENT" == true ]]; then
+    # APPROVE / REQUEST_CHANGES: submit as a single GitHub review (body + inline + event)
+    REVIEW_PAYLOAD=$(jq -n \
+        --arg event "$EVENT" \
+        --arg commit "$COMMIT_SHA" \
+        --arg body "$BODY_CONTENT" \
+        --argjson comments "$VALIDATED_COMMENTS" \
+        '{
+            event: $event,
+            commit_id: $commit,
+            body: $body,
+            comments: $comments
+        }')
 
-REVIEW_PAYLOAD=$(jq -n \
-    --arg event "$EVENT" \
-    --arg commit "$COMMIT_SHA" \
-    --argjson comments "$VALIDATED_COMMENTS" \
-    '{
-        event: $event,
-        commit_id: $commit,
-        body: "",
-        comments: $comments
-    }')
+    if [[ "$DRY_RUN" == true ]]; then
+        echo ""
+        echo "=== DRY RUN: Review ==="
+        echo "Event: $EVENT"
+        echo "Commit: ${COMMIT_SHA:0:8}"
+        echo "Body size: ${#BODY_CONTENT} chars"
+        echo "Inline comments: $VALID_COUNT"
+        if [[ "$VALID_COUNT" != "0" ]]; then
+            echo "$REVIEW_PAYLOAD" | jq '.comments[] | {path, line, start_line}'
+        fi
+        exit 0
+    fi
 
-if [[ "$DRY_RUN" == true ]]; then
-    echo ""
-    echo "=== DRY RUN: Inline review ==="
-    echo "Event: $EVENT"
-    echo "Commit: ${COMMIT_SHA:0:8}"
-    echo "Comments:"
-    echo "$REVIEW_PAYLOAD" | jq '.comments[] | {path, line, start_line}'
-    echo ""
-    echo "Full payload:"
-    echo "$REVIEW_PAYLOAD" | jq '.'
-    exit 0
+    RESPONSE=$(echo "$REVIEW_PAYLOAD" | gh api \
+        "repos/${OWNER_REPO}/pulls/${PR_NUMBER}/reviews" \
+        --method POST \
+        --input - 2>&1) || {
+        echo ""
+        echo "Warning: Review submission failed."
+        echo "  $RESPONSE"
+        exit 1
+    }
+
+    REVIEW_URL=$(echo "$RESPONSE" | jq -r '.html_url // empty' 2>/dev/null || true)
+    if [[ -n "$REVIEW_URL" ]]; then
+        echo "$REVIEW_URL"
+    fi
+    echo "Posted ${EVENT} review with ${VALID_COUNT} inline comment(s)."
+
+else
+    # COMMENT event: post body as issue comment, then inline comments as separate review
+    if [[ "$DRY_RUN" == true ]]; then
+        echo ""
+        echo "=== DRY RUN: Comment ==="
+        echo "Body size: $(wc -c < "$BODY_FILE") bytes"
+        if [[ "$VALID_COUNT" != "0" ]]; then
+            echo "Inline comments: $VALID_COUNT"
+        fi
+        exit 0
+    fi
+
+    gh pr comment "$PR_NUMBER" --body-file "$BODY_FILE"
+    echo "Posted new PR comment."
+
+    if [[ "$VALID_COUNT" != "0" ]]; then
+        REVIEW_PAYLOAD=$(jq -n \
+            --arg event "COMMENT" \
+            --arg commit "$COMMIT_SHA" \
+            --argjson comments "$VALIDATED_COMMENTS" \
+            '{
+                event: $event,
+                commit_id: $commit,
+                body: "",
+                comments: $comments
+            }')
+
+        RESPONSE=$(echo "$REVIEW_PAYLOAD" | gh api \
+            "repos/${OWNER_REPO}/pulls/${PR_NUMBER}/reviews" \
+            --method POST \
+            --input - 2>&1) || {
+            echo ""
+            echo "Warning: Inline review submission failed."
+            echo "  $RESPONSE"
+            echo "  Body comment was already posted. All findings are visible there."
+            exit 0
+        }
+
+        echo "Posted inline review with ${VALID_COUNT} comment(s)."
+    fi
 fi
-
-# Submit the review
-RESPONSE=$(echo "$REVIEW_PAYLOAD" | gh api \
-    "repos/${OWNER_REPO}/pulls/${PR_NUMBER}/reviews" \
-    --method POST \
-    --input - 2>&1) || {
-    echo ""
-    echo "Warning: Inline review submission failed."
-    echo "  $RESPONSE"
-    echo "  Body comment was already posted. All findings are visible there."
-    exit 0
-}
-
-echo "Posted inline review with ${VALID_COUNT} comment(s)."
