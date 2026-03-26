@@ -17,6 +17,10 @@ Multi-agent pull request review that analyses code changes across six dimensions
 - `--base BRANCH_NAME`: Override the detected base branch
 - `--headless`: Non-interactive mode for CI/automation (see Headless Mode section)
 
+## Working Directory
+
+**Stay in the current working directory for the entire review.** Do not `cd` to the repository root or any other directory. If running inside a git worktree, all git commands, file reads, and sub-agent dispatches must operate within that worktree. When launching sub-agents via the Task tool, explicitly tell each sub-agent to work within the current directory and not change to another location.
+
 ## Phase 1: Context Gathering
 
 Run these steps sequentially before dispatching sub-agents.
