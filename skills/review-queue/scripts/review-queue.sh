@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+# Usage: review-queue.sh [--user USERNAME]
+TARGET_USER=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --user) TARGET_USER="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
 # Detect if we're in a git repo and get the owner/repo
 CURRENT_REPO=""
 if git rev-parse --is-inside-work-tree &>/dev/null; then
   CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
 fi
 
-MY_LOGIN=$(gh api user --jq .login)
+if [ -n "$TARGET_USER" ]; then
+  REVIEW_USER="$TARGET_USER"
+else
+  REVIEW_USER=$(gh api user --jq .login)
+fi
 
-# Fetch open PRs requesting my review (non-draft)
+# Fetch open PRs requesting this user's review (non-draft)
 if [ -n "$CURRENT_REPO" ]; then
   prs=$(gh search prs \
-    --review-requested=@me \
+    --review-requested="$REVIEW_USER" \
     --state=open \
     --draft=false \
     --repo "$CURRENT_REPO" \
@@ -20,7 +33,7 @@ if [ -n "$CURRENT_REPO" ]; then
     --jq '.')
 else
   prs=$(gh search prs \
-    --review-requested=@me \
+    --review-requested="$REVIEW_USER" \
     --state=open \
     --draft=false \
     --json repository,title,author,url,number,createdAt \
@@ -28,7 +41,11 @@ else
 fi
 
 if [ -z "$prs" ] || [ "$prs" = "[]" ]; then
-  echo "No PRs are currently waiting for your review."
+  if [ -n "$TARGET_USER" ]; then
+    echo "No PRs are currently waiting for ${TARGET_USER}'s review."
+  else
+    echo "No PRs are currently waiting for your review."
+  fi
   exit 0
 fi
 
@@ -38,18 +55,14 @@ echo "$prs" | jq -c '.[]' | while read -r pr; do
   number=$(echo "$pr" | jq -r '.number')
 
   review_info=$(gh pr view "$number" --repo "$repo" --json reviews,commits 2>/dev/null \
-    | jq --arg me "$MY_LOGIN" '{
+    | jq --arg me "$REVIEW_USER" '{
       changes_requested: ([.reviews | group_by(.author.login)[] | last | select(.state == "CHANGES_REQUESTED")] | length),
       all_cr_authors: [.reviews | group_by(.author.login)[] | last | select(.state == "CHANGES_REQUESTED") | .author.login],
       my_review: ([.reviews[] | select(.author.login == $me)] | last | {state, submittedAt}),
       last_commit: (.commits | last | .committedDate)
     }' 2>/dev/null || echo '{"changes_requested": 0, "all_cr_authors": [], "my_review": {"state": null, "submittedAt": null}, "last_commit": null}')
 
-  # Include the PR if:
-  # - No reviewer has requested changes, OR
-  # - I have a previous review (author re-requested my review despite existing CRs), OR
-  # - Only I requested changes and new commits have arrived since (re-review)
-  include=$(echo "$review_info" | jq --arg me "$MY_LOGIN" '
+  include=$(echo "$review_info" | jq --arg me "$REVIEW_USER" '
     .changes_requested == 0 or
     .my_review.state != null or (
       ([.all_cr_authors[] | select(. != $me)] | length) == 0
@@ -66,4 +79,4 @@ echo "$prs" | jq -c '.[]' | while read -r pr; do
       needsRereview: ($info.my_review.state != null)
     }'
   fi
-done | jq -s --arg current_repo "$CURRENT_REPO" '{in_repo: ($current_repo != ""), repo: $current_repo, prs: .}'
+done | jq -s --arg current_repo "$CURRENT_REPO" --arg user "$REVIEW_USER" '{in_repo: ($current_repo != ""), repo: $current_repo, user: $user, prs: .}'
