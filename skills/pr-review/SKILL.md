@@ -181,6 +181,51 @@ Prompt focus:
 
 ### Sub-agent 6: Build Validation
 
+There are two modes depending on how the review was invoked:
+
+**When reviewing a PR by number:** Do NOT run local build commands — they run against the wrong code and can cause side effects (e.g., turborepo writing cache/artifacts to a parent repo when running from a worktree). Instead, fetch GitHub CI status and Cloud Build details.
+
+No sub-agent needed — run these in Phase 1 and include the results directly.
+
+**Step 1 — Get check status from GitHub:**
+```bash
+gh pr checks PR_NUMBER --json name,state,link
+```
+
+**Step 2 — For any FAILED check with a Cloud Build link, fetch the build logs:**
+
+Extract the build ID from the link URL (the UUID segment), then:
+```bash
+gcloud builds describe BUILD_ID \
+  --region=europe-west2 \
+  --project=lleverage \
+  --account="dev-agent@lleverage.iam.gserviceaccount.com" \
+  --format='json(status,steps.id,steps.status)'
+```
+
+If any step failed, get the raw logs and extract the relevant failure output:
+```bash
+gcloud builds log BUILD_ID \
+  --region=europe-west2 \
+  --project=lleverage \
+  --account="dev-agent@lleverage.iam.gserviceaccount.com" 2>&1 | grep -A 50 "Step #N.*FAILED\|error TS\|ERR!\|FAIL " | head -60
+```
+
+**Report format:**
+
+| Step | Status |
+|------|--------|
+| Format | PASS |
+| Lint | PASS |
+| Type Check | FAIL |
+| Unit Tests | PASS |
+
+For failures, include the first 20 lines of error output from the build logs. For PENDING builds, report PENDING and note the build is still running.
+
+If Cloud Build access fails (permissions, auth), fall back to the `gh pr checks` pass/fail table with the console link.
+
+**When reviewing the current local branch (no PR number):**
+
 **Task tool config:** `subagent_type: "general-purpose"`, `model: "haiku"`
 
 Run the following commands and report results:
