@@ -7,7 +7,9 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
   CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
 fi
 
-# Fetch open PRs requesting my review (non-draft, no changes_requested from anyone)
+MY_LOGIN=$(gh api user --jq .login)
+
+# Fetch open PRs requesting my review (non-draft)
 if [ -n "$CURRENT_REPO" ]; then
   prs=$(gh search prs \
     --review-requested=@me \
@@ -30,15 +32,38 @@ if [ -z "$prs" ] || [ "$prs" = "[]" ]; then
   exit 0
 fi
 
-# Filter out PRs where any reviewer has requested changes
+# Filter out PRs where any reviewer has requested changes, and enrich with review state
 echo "$prs" | jq -c '.[]' | while read -r pr; do
   repo=$(echo "$pr" | jq -r '.repository.nameWithOwner')
   number=$(echo "$pr" | jq -r '.number')
 
-  changes_requested=$(gh pr view "$number" --repo "$repo" --json reviews \
-    --jq '[.reviews[] | select(.state == "CHANGES_REQUESTED")] | length' 2>/dev/null || echo "0")
+  review_info=$(gh pr view "$number" --repo "$repo" --json reviews,commits 2>/dev/null \
+    | jq --arg me "$MY_LOGIN" '{
+      changes_requested: ([.reviews | group_by(.author.login)[] | last | select(.state == "CHANGES_REQUESTED")] | length),
+      all_cr_authors: [.reviews | group_by(.author.login)[] | last | select(.state == "CHANGES_REQUESTED") | .author.login],
+      my_review: ([.reviews[] | select(.author.login == $me)] | last | {state, submittedAt}),
+      last_commit: (.commits | last | .committedDate)
+    }' 2>/dev/null || echo '{"changes_requested": 0, "all_cr_authors": [], "my_review": {"state": null, "submittedAt": null}, "last_commit": null}')
 
-  if [ "$changes_requested" = "0" ]; then
-    echo "$pr"
+  # Include the PR if:
+  # - No reviewer has requested changes, OR
+  # - I have a previous review (author re-requested my review despite existing CRs), OR
+  # - Only I requested changes and new commits have arrived since (re-review)
+  include=$(echo "$review_info" | jq --arg me "$MY_LOGIN" '
+    .changes_requested == 0 or
+    .my_review.state != null or (
+      ([.all_cr_authors[] | select(. != $me)] | length) == 0
+      and .my_review.state == "CHANGES_REQUESTED"
+      and .last_commit > .my_review.submittedAt
+    )
+  ')
+
+  if [ "$include" = "true" ]; then
+    echo "$pr" | jq --argjson info "$review_info" '. + {
+      myReviewState: $info.my_review.state,
+      myReviewAt: $info.my_review.submittedAt,
+      lastCommitAt: $info.last_commit,
+      needsRereview: ($info.my_review.state != null)
+    }'
   fi
 done | jq -s --arg current_repo "$CURRENT_REPO" '{in_repo: ($current_repo != ""), repo: $current_repo, prs: .}'

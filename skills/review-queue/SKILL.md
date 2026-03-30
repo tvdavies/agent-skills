@@ -12,6 +12,8 @@ metadata:
 
 1. Run `~/.claude/skills/review-queue/scripts/review-queue.sh`
 2. The output JSON has `in_repo` (boolean) and `prs` (array)
-3. If `in_repo` is true, show a table with columns: #, Title (linked), Author, Age
-4. If `in_repo` is false, show a table with columns: Repo, #, Title (linked), Author, Age
-5. If there are no PRs, relay the message
+3. Each PR object includes `needsRereview` (boolean), `myReviewState` (e.g. "COMMENTED", "APPROVED", or null), and `myReviewAt` (ISO timestamp or null)
+4. Split PRs into two groups: **Re-review** (`needsRereview` is true) shown first, then **Fresh review** (everything else)
+5. If `in_repo` is true, show tables with columns: #, Title (linked), Author, Age, and for re-review PRs add a "My Last Review" column showing the state
+6. If `in_repo` is false, add a Repo column to the tables
+7. If there are no PRs, relay the message
