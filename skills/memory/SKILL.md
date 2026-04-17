@@ -1,13 +1,22 @@
 ---
 name: memory
 description: >
-  Capture and recall durable memories in ~/brain/memories. Use PROACTIVELY at the
-  end of non-trivial work to save what was learned, what was done, decisions made,
-  user preferences revealed, and non-obvious facts about systems, repos, or
-  workflows. Also use to retrieve past memories when the user asks "do you
-  remember", "what did we do", references prior conversations, or when current
-  work might relate to past findings.
-version: 0.1.0
+  Capture and recall durable memories in ~/brain/memories. MUST be invoked
+  proactively (without being asked) whenever any of these happen in a
+  conversation: (1) the user reveals a role, preference, responsibility, or
+  workflow detail about themselves; (2) the user corrects your approach OR
+  validates a non-obvious choice you made ("yes, exactly", "keep doing that");
+  (3) you learn a non-obvious fact about a codebase, system, tool, or external
+  resource; (4) you finish non-trivial work that produced a decision with
+  rationale, a solved problem, or an outcome worth referring back to; (5) the
+  user mentions an ongoing project, initiative, incident, deadline, or
+  stakeholder context not derivable from code. Also invoke to retrieve past
+  memories when the user says "do you remember", "earlier", "last time",
+  "we did", "did we", or references prior conversations, or when current work
+  overlaps a topic likely covered before. A SessionStart hook injects
+  ~/brain/memories/INDEX.md into context — consult that injected index first
+  to decide which full memory files to read.
+version: 0.2.0
 ---
 
 # memory
@@ -26,13 +35,15 @@ Read ~/brain/README.md
 
 ## When to save a memory (proactive)
 
-Save without being asked when any of the following happens during a task:
+Save without being asked when any of the following happens during a task. These mirror the categories the old auto-memory system tracked — all of them now live here as memory files with appropriate tags:
 
-- **Learned a non-obvious fact** about a codebase, system, or tool — e.g. "repo X's migrations run in Y order", "service Z requires header W".
-- **Solved a problem** where the cause or fix wasn't immediately obvious. Capture the symptom, the cause, and the fix.
-- **Discovered a user preference** not already recorded — e.g. "prefers tests alongside source, not in a tests/ dir".
-- **Completed meaningful work** worth referring back to — a migration, a refactor, an investigation outcome.
-- **Made a decision with rationale** that might be revisited — "chose X over Y because Z".
+- **User detail** (tag `kind/user`) — role, responsibilities, expertise, tools they use, how they prefer to collaborate. e.g. "works at lleverage.ai on X", "deep Go background, new to frontend".
+- **Feedback** (tag `kind/feedback`) — a correction ("don't do X") OR a validation ("yes, that was the right call"). Record *both* the rule and the `Why:` / `How to apply:` context so a future session can judge edge cases. Watch for quiet confirmations, not just loud corrections.
+- **Project context** (tag `kind/project`) — who's doing what, why, by when. Deadlines, incidents, stakeholder asks, motivation behind work that isn't obvious from code. Convert relative dates to absolute ISO dates.
+- **Reference** (tag `kind/reference`) — pointers to external systems: Linear project keys, Grafana dashboards, Slack channels, runbook URLs, where a team tracks X.
+- **Non-obvious fact** about a codebase, system, or tool — e.g. "repo X's migrations run in Y order", "service Z requires header W".
+- **Solved problem** where the cause or fix wasn't immediately obvious. Capture the symptom, the cause, and the fix.
+- **Decision with rationale** that might be revisited — "chose X over Y because Z".
 
 Skip the memory if:
 
@@ -45,55 +56,42 @@ Bias toward saving. A slightly redundant memory is cheaper than a missing one. W
 
 ## When to search memory
 
+The SessionStart hook injects `~/brain/memories/INDEX.md` into context at the start of every conversation — so a lightweight scan of that index has already happened by the time you're reading this. Use it as your first stop.
+
 Search before answering when:
 
 - The user says "remember", "earlier", "last time", "we did", "did we", "what did I/we…".
 - The task overlaps a topic likely to have been encountered before (same repo, same tool, similar bug).
 - You're about to give advice that depends on how a particular system/repo works.
 
+Check the injected INDEX first — if an entry's one-liner hook looks relevant, `Read` that full memory file. Fall back to `Glob`/`Grep` across `~/brain/memories/` only if the index doesn't surface anything useful (e.g. the memory predates the index or uses unexpected keywords).
+
 ## Saving a memory
 
-1. **Read `~/brain/README.md`** if you haven't already this session — it's the source of truth for frontmatter and link syntax.
-2. **Check for an existing memory** on the same topic:
+Delegate the mechanical parts (frontmatter, vault-link hunting, INDEX update, git) to the `save-memory` helper script. It shells out to a cheap/fast model internally, so this keeps the main agent's context clean and is much quicker than doing it step-by-step here.
+
+### The fast path (default)
+
+1. **Compose a rough note** — a paragraph or two that captures:
+   - The takeaway (what a future session should know).
+   - The "why" / surrounding context, so a future reader can judge whether it still applies.
+   - Any specific entities, slugs, or related notes you already know about — mention them by name in the note. The helper will pick them up as links/entities.
+   - If the note is really about updating an existing memory, say so explicitly ("update the [[existing-slug]] memory to add…") so the helper chooses the update path.
+2. **Invoke the script** via Bash:
    ```
-   Glob ~/brain/memories/*<keyword>*.md
-   Grep <topic> in ~/brain/memories/
+   ~/.claude/skills/memory/bin/save-memory [--entity NAME]... [--tag NAME]... "<rough note>"
    ```
-   If one exists and is close enough, update it instead of adding a new file.
-3. **Search the rest of the vault for notes to link to** — `Glob ~/brain/**/*<keyword>*.md` across `findings/`, `plans/`, `documents/`. Collect filenames to wiki-link from the body.
-4. **Pick a filename** — kebab-case, descriptive, no date. Aim for a name that a future search would actually type (it's also the wiki-link target).
-5. **Pull** before writing: `git -C ~/brain pull --rebase`.
-6. **Write** the file using the memory frontmatter from the README:
-   ```yaml
-   ---
-   title: Short Human-Readable Title
-   date: YYYY-MM-DD
-   type: memory
-   source: one line on the task or conversation that produced this
-   entities:
-     - repo/name
-     - some/file/path
-     - person-name
-   tags:
-     - topic/area
-     - repo/name
-   ---
+   `--entity` / `--tag` are optional hints for required entries in frontmatter — only pass them if you know something the note doesn't make obvious. The note itself can be passed as the final argument or piped on stdin.
+3. **Run it in the background** (`run_in_background: true` on the Bash call) whenever the user isn't waiting on the confirmation — i.e. almost always for proactive saves. On success the script prints `<action> <slug>` and writes `OK <timestamp>: <action> <slug>` to `~/brain/.save-memory.last`.
+4. **If you ran in background**, glance at `~/brain/.save-memory.last` at the end of your turn (or next time you're idle) to confirm the save succeeded. Full transcript of every run is in `~/brain/.save-memory.log`.
 
-   # Short Human-Readable Title
+The script handles: pulling the vault, picking a slug, writing frontmatter per `~/brain/README.md`, finding genuinely related notes to wiki-link, updating `memories/INDEX.md`, and committing + pushing. It uses a file lock so concurrent invocations don't race.
 
-   Body — a few sentences. Lead with the takeaway. Include the "why" or
-   surrounding context, not just the fact, so a future reader can judge
-   whether it still applies. Use [[wiki-links]] to connect to related
-   findings, plans, or earlier memories.
+### Fallback path (script unavailable or failing)
 
-   ## Related
+Only fall back if `save-memory` exits non-zero twice in a row or the `claude` CLI isn't on PATH. In that case, do the work manually: read `~/brain/README.md`, `Glob`/`Grep` for an existing memory on the topic, write `memories/<slug>.md` with the frontmatter schema from the README, add a line to `memories/INDEX.md` (remove `_No memories yet._` if present), then `git -C ~/brain add <files> && git commit -m "memory: add <slug>" && git push`.
 
-   - [[related-finding]]
-   - [[related-memory]]
-   ```
-7. **Commit and push** following the README's git workflow. Commit message: `memory: add <slug>` or `memory: update <slug>`.
-
-Keep memories short. If it wants to grow past a page, it's probably a finding — use the `brain` skill and save it to `findings/` instead, and optionally leave a one-line memory pointing to it.
+Keep memories short. If a note wants to grow past a page, it's probably a finding — use the `brain` skill and save it to `findings/` instead, and optionally leave a short memory pointing to it.
 
 ## Searching memory (v1)
 
@@ -113,12 +111,14 @@ If a memory turns out to be wrong, outdated, or superseded:
 
 - **Update** it in place with `Edit`. Bump `date` to today.
 - If the underlying truth has changed, say so explicitly in the body (e.g. "As of YYYY-MM-DD this changed — …") rather than silently overwriting.
-- Commit with `memory: update <slug>`.
+- **Update the entry in `INDEX.md`** if the one-line hook is now misleading.
+- Commit both files with `memory: update <slug>`.
 
 If a memory is simply obsolete and should not be recalled:
 
-- Delete the file.
-- Commit with `memory: archive <slug>`.
+- Delete the memory file.
+- **Remove the entry from `INDEX.md`** so future sessions don't try to read a missing file.
+- Commit both changes with `memory: archive <slug>`.
 
 ## Future
 
