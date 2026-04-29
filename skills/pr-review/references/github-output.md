@@ -15,21 +15,12 @@ For clean PRs with no findings or only minor positives. Keep it short.
 
 **{COMMIT_COUNT}** commits | **{FILE_COUNT}** files changed | **{ADDITIONS}** additions | **{DELETIONS}** deletions
 
-{SUMMARY — 2-3 sentences. Focus on what the PR does well, not what it doesn't do wrong.}
-
-<details>
-<summary>Files Reviewed ({TOTAL_FILE_COUNT})</summary>
-
-{FILE_LIST}
-
-</details>
+{SUMMARY — one short sentence stating why the PR is fine. Wrap any extra context in a `<details><summary>More context</summary>...</details>` block.}
 
 ---
-
-*Automated review by pr-review skill*
 ```
 
-No findings sections, no "What's Good" padding, no build status (CI covers that).
+No findings sections, no "What's Good" padding, no build status (CI covers that), no Files Reviewed section (GitHub's Files Changed tab covers that).
 
 ### APPROVE_WITH_SUGGESTIONS Template
 
@@ -40,7 +31,7 @@ Same condensed format but with a visible suggestions section (max 3 items, not c
 
 **{COMMIT_COUNT}** commits | **{FILE_COUNT}** files changed | **{ADDITIONS}** additions | **{DELETIONS}** deletions
 
-{SUMMARY — 2-3 sentences}
+{SUMMARY — 1-2 punchy sentences. Wrap any longer rationale in a `<details><summary>More context</summary>...</details>` block.}
 
 ---
 
@@ -52,16 +43,7 @@ Same condensed format but with a visible suggestions section (max 3 items, not c
 
 {SUGGESTION_3 — max 3 total}
 
-<details>
-<summary>Files Reviewed ({TOTAL_FILE_COUNT})</summary>
-
-{FILE_LIST}
-
-</details>
-
 ---
-
-*Automated review by pr-review skill*
 ```
 
 ### REQUEST_CHANGES Template
@@ -73,7 +55,7 @@ Full output with all severity sections.
 
 **{COMMIT_COUNT}** commits | **{FILE_COUNT}** files changed | **{ADDITIONS}** additions | **{DELETIONS}** deletions
 
-{SUMMARY — 2-3 sentences describing what the PR does and overall quality}
+{SUMMARY — 1-2 punchy sentences stating the headline reason for the verdict. Wrap any longer rationale in a `<details><summary>More context</summary>...</details>` block.}
 
 ---
 
@@ -85,16 +67,7 @@ Full output with all severity sections.
 
 {SUGGESTION_SECTION — only if suggestion findings exist, max 3}
 
-<details>
-<summary>Files Reviewed ({TOTAL_FILE_COUNT})</summary>
-
-{FILE_LIST — one per line with status}
-
-</details>
-
 ---
-
-*Automated review by pr-review skill*
 ```
 
 ## Verdict Badges
@@ -107,15 +80,23 @@ Use these exact strings based on the verdict:
 
 ## Ticket Compliance Section
 
-Only include if a ticket was found:
+Only include if a ticket was found. The status headline MUST be the only thing visible without expansion; the rationale and requirement breakdown go inside the collapsible block.
 
 ```markdown
-### 📋 Ticket Compliance — {TICKET_ID}
+<details>
+<summary>📋 Ticket Compliance — {TICKET_ID} — {STATUS_HEADLINE}</summary>
 
 {COMPLIANCE_SUMMARY — brief assessment}
 
 {REQUIREMENT_LIST — if specific requirements were checked}
+
+</details>
 ```
+
+**Status headline format** — pick one based on the assessment, keep it on one line:
+- `✅ All N criteria met`
+- `🟡 N/M criteria met` — most met, with partial or scope gaps
+- `🔴 N criteria not met` — outright gaps that block merge
 
 ## Severity Sections
 
@@ -192,16 +173,6 @@ Each severity tier is a collapsible section with a count in the summary line. On
 </details>
 ```
 
-## Files Reviewed List
-
-Inside the collapsible files section, list each file. Only annotate files that have findings:
-
-```markdown
-- `path/to/file.ts` — 🔴 1 Critical, 🟠 1 Should Fix
-- `path/to/other-file.tsx`
-- `path/to/test-file.test.ts` — 🔵 1 Suggestion
-```
-
 ## Formatting Rules
 
 1. **No raw HTML except `<details>` and `<summary>`** — GitHub markdown renders these natively
@@ -222,7 +193,7 @@ When posting an incremental re-review (`--since`), use this template instead of 
 
 Since `{COMMIT_SHA}` — **{NEW_COMMIT_COUNT}** new commits | **{FILE_COUNT}** files changed
 
-{SUMMARY — 2-3 sentences covering what changed and the overall delta}
+{SUMMARY — 1-2 punchy sentences covering the delta. Wrap any longer rationale in a `<details><summary>More context</summary>...</details>` block.}
 
 ---
 
@@ -240,16 +211,7 @@ Since `{COMMIT_SHA}` — **{NEW_COMMIT_COUNT}** new commits | **{FILE_COUNT}** f
 
 {NEW_FINDINGS_SECTION — only if new findings exist}
 
-<details>
-<summary>Files Reviewed ({TOTAL_FILE_COUNT})</summary>
-
-{FILE_LIST — one per line with status}
-
-</details>
-
 ---
-
-*Incremental review by pr-review skill*
 ```
 
 ### Resolved Section
@@ -396,7 +358,7 @@ Map the review verdict to a GitHub review event:
 | Verdict | Event |
 |---------|-------|
 | REQUEST_CHANGES | REQUEST_CHANGES |
-| APPROVE_WITH_SUGGESTIONS | COMMENT |
+| APPROVE_WITH_SUGGESTIONS | APPROVE |
 | APPROVE | APPROVE |
 
 ## Posting Commands
