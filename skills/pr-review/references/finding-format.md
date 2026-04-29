@@ -74,6 +74,31 @@ If you cannot confirm the issue after these steps, downgrade to SHOULD_FIX or dr
 
 Review the changed code and any surrounding context necessary to evaluate its correctness. Do not flag pre-existing issues in unchanged code unless the PR's changes make them newly relevant or dangerous. If you read an unchanged file to understand context, that's expected — but don't generate findings against it unless the PR creates or worsens the problem.
 
+## When to Ask for Tests
+
+The default is **don't ask**. A finding that requests new test coverage clears a high bar; most code does not need a test added in review to be safe to merge. Coverage-for-its-own-sake test asks are the single biggest source of frustrating re-reviews — apply this rule strictly.
+
+Only ask for tests when at least one of these applies:
+
+- **Security or authorisation**: the code under review decides who gets access, and a silent regression of the predicate would grant access to someone who should not have it.
+- **Data loss or corruption**: the code can silently delete, overwrite, or mis-attribute data, with no other tripwire to catch a regression.
+- **Subtle correctness primitive**: optimistic locks, race-condition guards, idempotency keys, retry budgets — code where the predicate is the entire point of the change and is easy to remove or invert unnoticed in a future refactor.
+- **False-confidence repair**: an existing test passes regardless of the predicate the change introduced, so the test no longer protects what it claims to. The fix here is to repair the existing test, not to add new ones.
+
+Do **not** ask for tests when:
+
+- The code is uncovered but the regression mode is benign (plumbing, glue code, shape passthrough, response-surface assertions).
+- The test would just restate the implementation rather than express a behaviour the system promises.
+- The branch is a trivial guard, early return, or default.
+- The path is obviously exercised by an existing integration or e2e test.
+- The motivation is "this method has no unit test" or "let's get coverage on this file" — coverage is not a finding.
+
+### Bundle test asks with the fix that requires them
+
+When a SHOULD_FIX or CRITICAL finding is asking the author to change code, AND the change clears the bar above, name the specific tests in the `fix` field — give the test names with the inputs and the assertion that proves the predicate is in force. Do not split "fix the code" and "now write a test for it" across two review rounds; that pattern is the most common cause of avoidable re-reviews.
+
+If the change does not clear the bar, do not ask for tests — not in this round, not in a follow-up round. Trust that the change is safe to merge without added coverage.
+
 ## Completeness Rule
 
 After reviewing, list the files you reviewed. For files with findings, include the count. Files without findings need only be listed — no need to explicitly say "no issues found" for each one.

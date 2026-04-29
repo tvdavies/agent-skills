@@ -16,6 +16,7 @@ Multi-agent pull request review that analyses code changes across six dimensions
 - `--post`: Post the review as a GitHub PR comment instead of conversational output
 - `--base BRANCH_NAME`: Override the detected base branch
 - `--headless`: Non-interactive mode for CI/automation (see Headless Mode section)
+- `--pr NUMBER`: Review a specific PR by number instead of detecting from the current branch. Uses `origin/BASE_BRANCH...origin/PR_HEAD_BRANCH` for the diff range and passes `--pr NUMBER` to `post-review.sh`.
 
 ## Working Directory
 
@@ -100,6 +101,22 @@ Group changed files into categories:
 - **Config**: `package.json`, `tsconfig.json`, `.eslintrc`, `turbo.json`, etc.
 - **Docs**: `.md`, `.mdx` files
 
+### 1.6 Fetch Conversation History
+
+If a PR number is available (either passed via `--pr NUMBER` or detected via `gh pr view` against the current branch), fetch the existing review conversation so sub-agents can avoid re-raising things the team already discussed. **Skip this step entirely when reviewing a local branch with no associated PR.**
+
+```bash
+bash /path/to/skill/scripts/fetch-conversation.sh --pr PR_NUMBER > /tmp/pr-prior-discussion.md
+```
+
+(Use the skill's base directory path for the script; pass `--repo OWNER/NAME` if `gh repo view` cannot infer the repo from the working directory.)
+
+The script outputs a compact markdown document with two sections:
+- **Line-comment threads** — each thread tagged `[RESOLVED]`, `[OUTDATED]`, or `[OPEN]`, with the file:line and the truncated message chain (latest reviewer → author → ...)
+- **Issue-level discussion** — the PR's main conversation tab, one bullet per comment
+
+If the script fails (network, auth, rate limit) or returns an empty document, proceed without prior-discussion context — do not block the review. Read `/tmp/pr-prior-discussion.md` once after running the script; if it exists and is non-empty, pass its contents into every sub-agent prompt in Phase 2.
+
 ## Phase 2: Dispatch Sub-agents
 
 Launch all applicable sub-agents in a SINGLE message using the Task tool. Each sub-agent receives:
@@ -108,8 +125,9 @@ Launch all applicable sub-agents in a SINGLE message using the Task tool. Each s
 - A summary of repo context (package manager, monorepo, test framework)
 - The full contents of CLAUDE.md (if it exists)
 - The finding format specification from `references/finding-format.md`
+- The prior-discussion summary from `/tmp/pr-prior-discussion.md` (if Phase 1.6 produced one)
 
-Read `references/finding-format.md` and include its contents in every sub-agent prompt.
+Read `references/finding-format.md` and include its contents in every sub-agent prompt. If `/tmp/pr-prior-discussion.md` exists and is non-empty, also read it and include its contents in every sub-agent prompt under a clear "Prior Discussion" heading.
 
 ### Sub-agent 1: Standards and Conventions
 
@@ -254,6 +272,17 @@ These are NOT findings — do not report them:
 - Types that could be narrower but are correct as-is
 - An approach that works but could use a different pattern
 
+**Respect prior discussion.** If a "Prior Discussion" section is included in your prompt, scan it before drafting any finding. For each finding you intend to raise, search the prior discussion for threads on the same file:line range or topic and apply this rule:
+
+- **Thread tagged `[RESOLVED]`**: do NOT re-raise. The team explicitly closed it. Only override this if the new commits demonstrably reintroduce the exact issue — and say so in the `why` field.
+- **Thread tagged `[OUTDATED]`**: the line the comment referred to no longer exists in the diff. Do NOT re-raise unless the same concern applies cleanly to the current code.
+- **Thread tagged `[OPEN]` where the author replied with reasoning and the reviewer accepted it** (look for "fair", "agreed", "ok", "lgtm", "👍", or a reviewer message ending without further objection): treat as resolved off-thread. Do NOT re-raise.
+- **Thread tagged `[OPEN]` where the author replied with reasoning and the reviewer has not yet responded**: the author has put the ball back in the reviewer's court. Do NOT re-raise the same concern as a finding — instead, if the concern still seems valid, note it as a `SUGGESTION` and acknowledge the open thread in the `why` field (e.g. "Open thread on this; restating because the author's reasoning does not address X").
+- **Thread tagged `[OPEN]` with no author response**: you may raise the finding, but in the `why` field add "Prior thread on this is still open with no author response."
+- **No prior thread on this file/line/topic**: raise normally.
+
+The goal is to never make the author re-defend a point they already addressed. The cost of skipping a real issue once is much lower than the cost of re-raising something the team already settled.
+
 Follow the finding format from the specification exactly. Only report findings with confidence at or above 80. List the files you reviewed — for files with findings, include the count; files without findings need only be listed. If you find nothing noteworthy, say so clearly. Do NOT manufacture findings to justify your existence. An empty category is a good sign, not a failure.
 
 ## Phase 3: Synthesise
@@ -353,7 +382,7 @@ When `--since COMMIT_SHA` is provided, the review shifts from a full assessment 
 ### Context Gathering (incremental)
 
 1. Narrow the diff to `COMMIT_SHA...HEAD` — only new commits are reviewed
-2. Retrieve the previous review by reading the most recent PR comment that contains "PR Review" and "pr-review skill" (use `gh pr view --comments` or `gh api`)
+2. Retrieve the previous review by reading the most recent PR review that contains "Approved", "Approved with Suggestions", or "Changes Requested" in an H2 heading (use `gh api` to list reviews)
 3. Parse the previous review to extract its findings (file, lines, title, severity)
 4. Run the full sub-agent analysis on the narrowed diff as normal
 
