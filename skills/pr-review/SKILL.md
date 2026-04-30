@@ -20,7 +20,7 @@ Multi-agent pull request review that analyses code changes across six dimensions
 
 ## Working Directory
 
-**Stay in the current working directory for the entire review.** Do not `cd` to the repository root or any other directory. If running inside a git worktree, all git commands, file reads, and sub-agent dispatches must operate within that worktree. When launching sub-agents via the Task tool, explicitly tell each sub-agent to work within the current directory and not change to another location.
+**Stay in the current working directory for the entire review.** Do not `cd` to the repository root or any other directory. If running inside a git worktree, all git commands, file reads, and sub-agent dispatches must operate within that worktree. When launching sub-agents, explicitly tell each sub-agent to work within the current directory and not change to another location.
 
 ## Phase 1: Context Gathering
 
@@ -119,7 +119,14 @@ If the script fails (network, auth, rate limit) or returns an empty document, pr
 
 ## Phase 2: Dispatch Sub-agents
 
-Launch all applicable sub-agents in a SINGLE message using the Task tool. Each sub-agent receives:
+Launch all applicable sub-agents in a SINGLE message using the current harness's sub-agent mechanism. When a sub-agent model/profile is suggested, use the closest equivalent available in the current harness:
+
+- **Sonnet / general-purpose / default model**: normal review agents
+- **Opus / strongest available / general-purpose**: architecture-level reasoning
+- **Haiku / Mini**: lightweight validation or straightforward checks
+- **Nano**: read-only lookup, summarisation, or cheap reconnaissance only
+
+Each sub-agent receives:
 - The base branch and diff range
 - The list of changed files with categories
 - A summary of repo context (package manager, monorepo, test framework)
@@ -131,7 +138,7 @@ Read `references/finding-format.md` and include its contents in every sub-agent 
 
 ### Sub-agent 1: Standards and Conventions
 
-**Task tool config:** `subagent_type: "general-purpose"`, `model: "sonnet"`
+**Sub-agent profile:** general-purpose review agent using Sonnet, Mini, or the closest available general-purpose/default model in the current harness.
 
 Prompt focus:
 - Check whether the code follows project conventions from CLAUDE.md (naming, imports, file structure, British English)
@@ -141,7 +148,7 @@ Prompt focus:
 
 ### Sub-agent 2: Security and Performance
 
-**Task tool config:** `subagent_type: "general-purpose"`, `model: "sonnet"`
+**Sub-agent profile:** general-purpose review agent using Sonnet, Mini, or the closest available general-purpose/default model in the current harness.
 
 Prompt focus — Security:
 - Hardcoded secrets, API keys, tokens in code or config
@@ -161,7 +168,7 @@ Security findings default to CRITICAL severity.
 
 ### Sub-agent 3: Architecture and Patterns
 
-**Task tool config:** `subagent_type: "general-purpose"`, `model: "opus"`
+**Sub-agent profile:** strongest available general-purpose reasoning agent — Opus, Sonnet, or the closest available general-purpose/default model in the current harness.
 
 Prompt focus:
 - Assess whether the approach is sound — does the architecture make sense for what the PR is trying to do?
@@ -176,7 +183,7 @@ Scoping: The sub-agent may read unchanged files to understand context, but must 
 
 **Condition:** Only dispatch if test files changed OR new code paths were added (new functions, new endpoints, new branches).
 
-**Task tool config:** `subagent_type: "general-purpose"`, `model: "sonnet"`
+**Sub-agent profile:** general-purpose review agent using Sonnet, Mini, or the closest available general-purpose/default model in the current harness.
 
 Prompt focus:
 - Are the tests sufficient to have confidence in this change?
@@ -188,7 +195,7 @@ Prompt focus:
 
 **Condition:** Only dispatch if a ticket was found and its details were retrieved.
 
-**Task tool config:** `subagent_type: "general-purpose"`, `model: "sonnet"`
+**Sub-agent profile:** general-purpose review agent using Sonnet, Mini, or the closest available general-purpose/default model in the current harness.
 
 Prompt focus:
 - Coverage of all requirements listed in the ticket
@@ -244,7 +251,7 @@ If Cloud Build access fails (permissions, auth), fall back to the `gh pr checks`
 
 **When reviewing the current local branch (no PR number):**
 
-**Task tool config:** `subagent_type: "general-purpose"`, `model: "haiku"`
+**Sub-agent profile:** lightweight validation agent using Haiku, Mini, or the closest available lightweight model in the current harness.
 
 Run the following commands and report results:
 1. **Type check**: Detect and run the project's type-check command (`pnpm type-check`, `npx tsc --noEmit`, etc.)
