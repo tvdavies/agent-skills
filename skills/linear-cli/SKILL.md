@@ -90,8 +90,8 @@ bash scripts/finish-issue.sh
 # Triage unassigned work
 bash scripts/triage.sh TEAM
 
-# Quick create
-bash scripts/quick-create.sh TEAM "Title" [priority] [assignee]
+# Quick create (use flags for options, not positional args)
+bash scripts/quick-create.sh TEAM "Title" -p 3 -a me
 ```
 
 ### Step 2b: Retrieving Visual Context from Issues
@@ -129,6 +129,17 @@ If `linear-cli` fails:
 2. Check team key: teams are LEG, LLEV, DES, EDU, FDE, LLE
 3. Retry with `--retry 2` for transient network errors
 4. If an issue ID isn't found, try searching: `linear-cli search issues "query"`
+
+### Agent Scripting Gotchas
+
+- Avoid piping `linear-cli` output to commands that may exit early, such as `head`, because the Rust CLI can panic on a broken stdout pipe. Prefer `--limit`, `--fields`, or parse the full JSON output with `jq`.
+- When using `jq` fallback expressions, include spaces around the optional field operator and fallback operator: `(.displayName? // "")`, not `(.displayName?//"")`. The latter is parsed as an invalid token by some jq versions.
+- For user lookup, prefer this safe pattern:
+
+```bash
+linear-cli users list --output json --compact --no-pager --quiet --fields id,name,email,displayName \
+  | jq -r '.[] | select(((.name // "") | test("Gabriel"; "i")) or ((.displayName? // "") | test("Gabriel"; "i")) or ((.email // "") | test("gabriel"; "i")))'
+```
 
 ## Quick Reference: Common Commands
 

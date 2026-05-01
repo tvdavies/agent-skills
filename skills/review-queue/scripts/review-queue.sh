@@ -40,6 +40,12 @@ else
     --jq '.')
 fi
 
+# Filter out dependabot and Snyk PRs
+prs=$(echo "$prs" | jq '[.[] | select(
+  (.author.login | test("dependabot|snyk"; "i") | not) and
+  (.title | startswith("[Snyk]") | not)
+)]')
+
 if [ -z "$prs" ] || [ "$prs" = "[]" ]; then
   if [ -n "$TARGET_USER" ]; then
     echo "No PRs are currently waiting for ${TARGET_USER}'s review."
