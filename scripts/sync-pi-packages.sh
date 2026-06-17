@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="${AGENT_TOOLS_DIR:-$HOME/agent-skills}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+DEFAULT_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+REPO_DIR="${AGENT_TOOLS_DIR:-$DEFAULT_REPO_DIR}"
 REPO_DIR="$(cd "$REPO_DIR" && pwd -P)"
 NO_UPDATE=false
 if [ "${1:-}" = "--no-update" ]; then

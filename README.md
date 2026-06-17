@@ -1,12 +1,12 @@
-# Agent Tools
+# Agent Toolkit
 
-Personal agent tooling shared across machines: Agent Skills, custom Pi extensions, optional prompts/themes, setup scripts, and a manifest for third-party Pi packages.
+Personal agent toolkit shared across machines: Agent Skills, custom Pi extensions, optional prompts/themes, setup scripts, and a manifest for third-party Pi packages.
 
 ## Fresh machine setup
 
 ```bash
-git clone git@github.com:tvdavies/agent-skills.git ~/agent-skills
-~/agent-skills/scripts/bootstrap.sh
+git clone git@github.com:tvdavies/agent-toolkit.git ~/agent-toolkit
+~/agent-toolkit/scripts/bootstrap.sh
 ```
 
 ### Copy-paste install prompt for an existing Pi session
@@ -14,30 +14,30 @@ git clone git@github.com:tvdavies/agent-skills.git ~/agent-skills
 Paste this into an already-running Pi session to have Pi fetch and install the toolkit for you:
 
 ```text
-Install the Agent Tools toolkit from GitHub into this Pi environment.
+Install the Agent Toolkit from GitHub into this Pi environment.
 
 Please do the following:
-1. Clone or update https://github.com/tvdavies/agent-skills.git at ~/agent-skills. If HTTPS auth fails, retry with git@github.com:tvdavies/agent-skills.git.
-2. Run ~/agent-skills/scripts/bootstrap.sh to install dependencies, link skills, install this repo as a local Pi package, and sync third-party Pi packages.
+1. Clone or update https://github.com/tvdavies/agent-toolkit.git at ~/agent-toolkit. If HTTPS auth fails, retry with git@github.com:tvdavies/agent-toolkit.git.
+2. Run ~/agent-toolkit/scripts/bootstrap.sh to install dependencies, link skills, install this repo as a local Pi package, and sync third-party Pi packages.
 3. Do not overwrite existing non-symlink skill directories; if bootstrap refuses for safety, stop and explain what I need to move or back up.
 4. Show the final Pi package status, then remind me to run /reload in this Pi session.
 
 You can start with:
 
 set -euo pipefail
-if [ -d "$HOME/agent-skills/.git" ]; then
-  git -C "$HOME/agent-skills" pull --ff-only
+if [ -d "$HOME/agent-toolkit/.git" ]; then
+  git -C "$HOME/agent-toolkit" pull --ff-only
 else
-  git clone https://github.com/tvdavies/agent-skills.git "$HOME/agent-skills" || git clone git@github.com:tvdavies/agent-skills.git "$HOME/agent-skills"
+  git clone https://github.com/tvdavies/agent-toolkit.git "$HOME/agent-toolkit" || git clone git@github.com:tvdavies/agent-toolkit.git "$HOME/agent-toolkit"
 fi
-"$HOME/agent-skills/scripts/bootstrap.sh"
+"$HOME/agent-toolkit/scripts/bootstrap.sh"
 ```
 
 The bootstrap script is idempotent and will:
 
 1. install this repo's npm dependencies for local extension development;
-2. link `~/.claude/skills` and `~/.agents/skills` to `~/agent-skills/skills`;
-3. install this repo as a local Pi package with `pi install ~/agent-skills`;
+2. link `~/.claude/skills` and `~/.agents/skills` to `~/agent-toolkit/skills`;
+3. install this repo as a local Pi package with `pi install ~/agent-toolkit`;
 4. install third-party Pi packages listed in `manifests/pi-packages.json`.
 
 It refuses to overwrite existing non-symlink skill directories.
@@ -45,13 +45,13 @@ It refuses to overwrite existing non-symlink skill directories.
 To also install local Git hooks that sync the setup after future pulls:
 
 ```bash
-~/agent-skills/scripts/bootstrap.sh --install-git-hooks
+~/agent-toolkit/scripts/bootstrap.sh --install-git-hooks
 ```
 
 Or install only the hooks:
 
 ```bash
-~/agent-skills/scripts/install-git-hooks.sh
+~/agent-toolkit/scripts/install-git-hooks.sh
 ```
 
 ## Repository layout
@@ -74,13 +74,13 @@ This repo is a Pi package. Its `package.json` exposes `skills/`, `extensions/`, 
 For active local development, install the local checkout:
 
 ```bash
-pi install "$HOME/agent-skills"
+pi install "$HOME/agent-toolkit"
 ```
 
 For a machine that should track the GitHub repo directly:
 
 ```bash
-pi install git:git@github.com:tvdavies/agent-skills.git@main
+pi install git:git@github.com:tvdavies/agent-toolkit.git@main
 ```
 
 After editing extensions, run `/reload` inside Pi.
@@ -92,8 +92,8 @@ After editing extensions, run `/reload` inside Pi.
 Claude Code and other harnesses still use fixed skill paths. Bootstrap maintains these symlinks:
 
 ```bash
-~/.claude/skills -> ~/agent-skills/skills
-~/.agents/skills -> ~/agent-skills/skills
+~/.claude/skills -> ~/agent-toolkit/skills
+~/.agents/skills -> ~/agent-toolkit/skills
 ```
 
 ## Adding a skill
@@ -118,7 +118,7 @@ Third-party package specs live in `manifests/pi-packages.json`.
 Install/reconcile them with:
 
 ```bash
-~/agent-skills/scripts/sync-pi-packages.sh
+~/agent-toolkit/scripts/sync-pi-packages.sh
 ```
 
 Add version pins or Git refs there if reproducibility becomes more important than easy updates.
@@ -128,7 +128,7 @@ Add version pins or Git refs there if reproducibility becomes more important tha
 For manual sync after pulling remote changes:
 
 ```bash
-cd ~/agent-skills
+cd ~/agent-toolkit
 git pull
 ./scripts/after-pull.sh --force
 ```
@@ -136,13 +136,13 @@ git pull
 For automatic local sync, install Git hooks:
 
 ```bash
-~/agent-skills/scripts/install-git-hooks.sh
+~/agent-toolkit/scripts/install-git-hooks.sh
 ```
 
 The hooks run `scripts/after-pull.sh` after merge pulls and `git pull --rebase`. The sync script:
 
 - installs npm dependencies only when `package.json`, `package-lock.json`, or `node_modules` require it;
-- keeps `~/.claude/skills` and `~/.agents/skills` pointed at `~/agent-skills/skills`;
+- keeps `~/.claude/skills` and `~/.agents/skills` pointed at `~/agent-toolkit/skills`;
 - ensures Pi has this local checkout installed as a package;
 - runs `scripts/sync-pi-packages.sh` when `manifests/pi-packages.json` changes;
 - reminds you to run `/reload` in active Pi sessions when loaded resources changed.

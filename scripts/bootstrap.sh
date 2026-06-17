@@ -7,7 +7,9 @@ if [ "${1:-}" = "--install-git-hooks" ]; then
   shift
 fi
 
-REPO_DIR="${AGENT_TOOLS_DIR:-$HOME/agent-skills}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+DEFAULT_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+REPO_DIR="${AGENT_TOOLS_DIR:-$DEFAULT_REPO_DIR}"
 REPO_DIR="$(cd "$REPO_DIR" && pwd -P)"
 
 if ! command -v pi >/dev/null 2>&1; then

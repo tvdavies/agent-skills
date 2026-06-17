@@ -1,6 +1,6 @@
 # Pi Extensions
 
-Custom Pi extensions bundled by the root `tvd-agent-tools` Pi package.
+Custom Pi extensions bundled by the root `agent-toolkit` Pi package.
 
 ## Extensions
 
@@ -19,7 +19,7 @@ Custom Pi extensions bundled by the root `tvd-agent-tools` Pi package.
 Install the repository as a Pi package rather than copying these files into `~/.pi/agent/extensions`:
 
 ```bash
-pi install "$HOME/agent-skills"
+pi install "$HOME/agent-toolkit"
 ```
 
 After adding or changing extensions, run `/reload` inside Pi.
