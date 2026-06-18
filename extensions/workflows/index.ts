@@ -32,10 +32,20 @@ interface UsageStats {
 	turns: number;
 }
 
-interface WorkflowDefinition {
+type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+// Parsed from `export const meta = { ... }` at the top of a workflow script.
+interface WorkflowMeta {
 	name: string;
 	description?: string;
-	run: (ctx: WorkflowContext, args: string) => Promise<WorkflowReport | string>;
+	whenToUse?: string;
+	model?: string;
+	phases?: Array<{ title: string; detail?: string; model?: string }>;
+}
+
+interface CompiledWorkflow {
+	meta: WorkflowMeta;
+	run: (globals: WorkflowGlobals) => Promise<unknown>;
 }
 
 interface WorkflowFile {
@@ -46,16 +56,36 @@ interface WorkflowFile {
 	hash: string;
 }
 
-interface WorkflowReport {
-	markdown: string;
-	details?: unknown;
+// Options accepted by the script-facing agent(prompt, opts) global (Claude Code shape).
+interface AgentRunOptions {
+	label?: string;
+	phase?: string;
+	schema?: unknown;
+	model?: string;
+	effort?: "low" | "medium" | "high" | "xhigh" | "max";
+	isolation?: "none" | "worktree";
+	agentType?: string;
 }
 
+// The globals injected into a workflow script body.
+interface WorkflowGlobals {
+	args: unknown;
+	budget: { total: number | null; spent: () => number; remaining: () => number };
+	agent: (prompt: string, opts?: AgentRunOptions) => Promise<unknown>;
+	parallel: (thunks: Array<() => Promise<unknown>>) => Promise<unknown[]>;
+	pipeline: (items: unknown[], ...stages: Array<(prev: unknown, item: unknown, index: number) => Promise<unknown>>) => Promise<unknown[]>;
+	phase: (title: string) => void;
+	log: (message: string) => void;
+	workflow: (nameOrRef: unknown, args?: unknown) => Promise<unknown>;
+}
+
+// Internal options passed to runSingleAgent (the subagent runner).
 interface AgentOptions {
 	label: string;
 	task: string;
 	cwd?: string;
 	model?: string;
+	thinking?: ThinkingLevel;
 	tools?: string[];
 	agentScope?: AgentScope;
 	timeoutMs?: number;
@@ -122,13 +152,13 @@ interface RunState {
 	report?: string;
 	error?: string;
 	runDir: string;
+	meta?: WorkflowMeta;
 }
 
-type WorkflowContext = ReturnType<typeof createWorkflowContext>;
 const execFile = promisify(execFileCb);
 
-const MAX_CONCURRENT_AGENTS = 8;
-const MAX_AGENTS_PER_RUN = 100;
+const MAX_CONCURRENT_AGENTS = Math.max(1, Math.min(16, os.cpus().length - 2));
+const MAX_AGENTS_PER_RUN = 1000;
 const MAX_AGENT_OUTPUT_BYTES = 50 * 1024;
 function parseMaxRunDurationMs(): number {
 	const raw = process.env.PI_WORKFLOW_MAX_RUN_HOURS?.trim();
@@ -142,18 +172,12 @@ const MAX_RUN_DURATION_MS = parseMaxRunDurationMs();
 const EXTENSION_KEY = "workflows";
 const USER_WORKFLOW_DIR = path.join(os.homedir(), ".pi", "agent", "workflows");
 const USER_APPROVAL_FILE = path.join(os.homedir(), ".pi", "agent", "workflow-approvals.json");
+const WORKFLOW_MODE_FILE = path.join(os.homedir(), ".pi", "agent", "workflow-mode.json");
 
 const activeRuns = new Map<string, RunState>();
 const abortControllers = new Map<string, AbortController>();
 let lastCtx: any;
 let lastPi: ExtensionAPI | undefined;
-
-function workflow(def: WorkflowDefinition): WorkflowDefinition {
-	if (!def || typeof def.name !== "string" || typeof def.run !== "function") {
-		throw new Error("Workflow must export workflow({ name, run })");
-	}
-	return def;
-}
 
 function sha256(text: string): string {
 	return crypto.createHash("sha256").update(text).digest("hex");
@@ -244,39 +268,173 @@ function discoverWorkflows(cwd: string): WorkflowFile[] {
 	return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+type WorkflowMode = { enabled: boolean; source: "command" | "env" | "default" };
+
+function parseEnvFlag(raw: string | undefined): boolean | undefined {
+	if (raw === undefined) return undefined;
+	const value = raw.trim().toLowerCase();
+	if (["1", "true", "on", "yes"].includes(value)) return true;
+	if (["0", "false", "off", "no", ""].includes(value)) return false;
+	return undefined;
+}
+
+// Standing workflow mode: an explicit /workflow-mode choice (persisted) wins; otherwise the
+// PI_WORKFLOW_MODE env var sets the default for headless/automation runs; otherwise off.
+function readWorkflowMode(): WorkflowMode {
+	const stored = readJsonFile<{ enabled?: unknown } | null>(WORKFLOW_MODE_FILE, null);
+	if (stored && typeof stored.enabled === "boolean") return { enabled: stored.enabled, source: "command" };
+	const envFlag = parseEnvFlag(process.env.PI_WORKFLOW_MODE);
+	if (envFlag !== undefined) return { enabled: envFlag, source: "env" };
+	return { enabled: false, source: "default" };
+}
+
+async function writeWorkflowMode(enabled: boolean): Promise<void> {
+	await writeJsonFile(WORKFLOW_MODE_FILE, { enabled });
+}
+
+async function clearWorkflowMode(): Promise<void> {
+	await fs.promises.rm(WORKFLOW_MODE_FILE, { force: true });
+}
+
+// Injected into the main agent's system prompt before each turn so it knows which saved workflows
+// and subagents are runnable, and (when mode is on) is nudged to orchestrate substantial tasks.
+function buildWorkflowSystemPromptAddendum(cwd: string): string | null {
+	const mode = readWorkflowMode();
+	const workflows = discoverWorkflows(cwd);
+	if (!mode.enabled && workflows.length === 0) return null;
+
+	const sections: string[] = ["## Workflows (workflow_run tool)"];
+
+	if (mode.enabled) {
+		sections.push(
+			"Workflow mode is ON. For substantive multi-step tasks that need breadth (a surface too large to cover serially), confidence (independent perspectives or adversarial verification before a risky output), or scale (more than one context can hold), prefer orchestrating with the workflow_run tool: scout the work-list inline first, then fan out. Handle trivial, mechanical, or conversational turns yourself.",
+		);
+	}
+
+	const workflowLines = workflows.length
+		? workflows.map((w) => `- ${w.name} (${w.scope})`).join("\n")
+		: "- (none saved — use workflow_run mode:'script' or mode:'generate')";
+	sections.push(`Saved workflows (run with workflow_run mode:'saved'):\n${workflowLines}`);
+
+	try {
+		const agents = discoverAgents(cwd, "user").agents;
+		const agentLines = agents
+			.slice(0, 24)
+			.map((a) => {
+				const summary = a.description ? ` — ${a.description.split("\n")[0].slice(0, 100)}` : "";
+				return `- ${a.name}${summary}`;
+			})
+			.join("\n");
+		if (agentLines) sections.push(`Subagents available to workflow scripts (agent(prompt, { agentType }), default scope):\n${agentLines}`);
+	} catch {
+		// Agent discovery is best-effort; a missing roster must not block the turn.
+	}
+
+	return sections.join("\n\n");
+}
+
+// Blank out string/template/comment contents (preserving length) so pattern checks and
+// brace matching only see real code, not prompt text that may contain "process" etc.
+function stripStringsAndComments(src: string): string {
+	let out = "";
+	let i = 0;
+	const n = src.length;
+	while (i < n) {
+		const c = src[i];
+		const next = src[i + 1];
+		if (c === "/" && next === "/") {
+			while (i < n && src[i] !== "\n") { out += " "; i++; }
+			continue;
+		}
+		if (c === "/" && next === "*") {
+			out += "  "; i += 2;
+			while (i < n && !(src[i] === "*" && src[i + 1] === "/")) { out += src[i] === "\n" ? "\n" : " "; i++; }
+			if (i < n) { out += "  "; i += 2; }
+			continue;
+		}
+		if (c === '"' || c === "'" || c === "`") {
+			const quote = c;
+			out += " "; i++;
+			while (i < n) {
+				if (src[i] === "\\") { out += "  "; i += 2; continue; }
+				if (src[i] === quote) { out += " "; i++; break; }
+				out += src[i] === "\n" ? "\n" : " "; i++;
+			}
+			continue;
+		}
+		out += c; i++;
+	}
+	return out;
+}
+
+function findMatchingBrace(src: string, openIndex: number): number {
+	let depth = 0;
+	for (let i = openIndex; i < src.length; i++) {
+		if (src[i] === "{") depth++;
+		else if (src[i] === "}") {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+
+function extractMeta(source: string): WorkflowMeta {
+	const stripped = stripStringsAndComments(source);
+	const match = stripped.match(/export\s+const\s+meta\s*=\s*/);
+	if (!match || match.index === undefined) throw new Error("Workflow must define `export const meta = { name, description }`.");
+	const braceStart = stripped.indexOf("{", match.index + match[0].length);
+	if (braceStart === -1) throw new Error("`meta` must be an object literal.");
+	const braceEnd = findMatchingBrace(stripped, braceStart);
+	if (braceEnd === -1) throw new Error("Unterminated `meta` object literal.");
+	const literal = source.slice(braceStart, braceEnd + 1);
+	let meta: WorkflowMeta;
+	try {
+		const sandbox = vm.createContext(Object.create(null));
+		meta = new vm.Script(`"use strict";(${literal})`, { timeout: 1000 }).runInContext(sandbox, { timeout: 1000 }) as WorkflowMeta;
+	} catch (error: any) {
+		throw new Error(`meta must be a plain object literal: ${error?.message ?? String(error)}`);
+	}
+	if (!meta || typeof meta.name !== "string" || !meta.name.trim()) throw new Error("`meta.name` is required and must be a non-empty string.");
+	return meta;
+}
+
 function validateScript(source: string): string[] {
 	const errors: string[] = [];
-	const allowedImport = /^\s*import\s+\{\s*workflow\s*\}\s+from\s+["']pi-workflows["'];?\s*$/;
-	const importStatements = source.match(/(^|\n)\s*import\s+[\s\S]*?;(?=\s|$)/g) ?? [];
-	for (const statement of importStatements) {
-		if (!allowedImport.test(statement.trim())) errors.push(`Forbidden import: ${statement.trim()}`);
+	const code = stripStringsAndComments(source);
+	if (/(^|\n)\s*import\b/.test(code)) {
+		errors.push("Workflow scripts must not import anything; use the injected globals (agent, parallel, pipeline, phase, log, workflow, args, budget).");
 	}
-	const forbidden = [/\bfrom\s+["']node:/, /\bfrom\s+["']fs["']/, /\bfrom\s+["']child_process["']/, /\bprocess\b/, /\bDate\.now\s*\(/, /\bMath\.random\s*\(/, /\beval\s*\(/, /\bFunction\s*\(/, /\bimport\s*\(/];
+	if (/(^|\n)\s*export\s+(?!const\s+meta\b)/.test(code)) {
+		errors.push("Only `export const meta` is allowed; the rest of the script uses the injected globals.");
+	}
+	const forbidden = [/\brequire\s*\(/, /\bprocess\b/, /\bDate\.now\s*\(/, /\bMath\.random\s*\(/, /\bnew\s+Date\s*\(\s*\)/, /\beval\s*\(/, /\bFunction\s*\(/, /\bimport\s*\(/];
 	for (const re of forbidden) {
-		if (re.test(source)) errors.push(`Forbidden pattern: ${re}`);
+		if (re.test(code)) errors.push(`Forbidden pattern (non-deterministic or unsafe): ${re}`);
 	}
-	if (!/export\s+default\s+workflow\s*\(/.test(source) && !/module\.exports\s*=\s*workflow\s*\(/.test(source)) {
-		errors.push("Workflow must default-export workflow({ ... })");
+	if (!/export\s+const\s+meta\s*=/.test(code)) {
+		errors.push("Workflow must define `export const meta = { name, description }`.");
 	}
-	if (!/ctx\.report\s*\(/.test(source)) errors.push("Workflow should return ctx.report(...)");
 	return errors;
 }
 
-function loadWorkflowFromSource(source: string, filePath: string): WorkflowDefinition {
+function loadWorkflowFromSource(source: string, filePath: string): CompiledWorkflow {
 	const errors = validateScript(source);
 	if (errors.length > 0) throw new Error(errors.join("\n"));
-	const transformed = source
-		.replace(/(^|\n)\s*import\s+\{\s*workflow\s*\}\s+from\s+["']pi-workflows["'];?\s*/g, "$1")
-		.replace(/export\s+default\s+workflow\s*\(/, "__workflow = workflow(")
-		.replace(/module\.exports\s*=\s*workflow\s*\(/, "__workflow = workflow(");
+	const meta = extractMeta(source);
+	// Neutralise the meta export so the remaining body can run inside a function wrapper.
+	const body = source.replace(/(^|\n)(\s*)export\s+const\s+meta\s*=/, "$1$2const meta =");
+	const wrapped = `"use strict";\n__workflowRun = async function (agent, parallel, pipeline, phase, log, workflow, args, budget) {\n${body}\n};`;
 	try {
 		const sandbox = vm.createContext(Object.create(null));
-		Object.defineProperty(sandbox, "workflow", { value: workflow, enumerable: true });
-		Object.defineProperty(sandbox, "__workflow", { value: undefined, writable: true, enumerable: true });
-		new vm.Script(`"use strict";\n${transformed}`, { filename: filePath, timeout: 1000 }).runInContext(sandbox, { timeout: 1000 });
-		const loaded = (sandbox as any).__workflow as WorkflowDefinition | undefined;
-		if (!loaded) throw new Error("Workflow module did not set a default workflow export.");
-		return loaded;
+		Object.defineProperty(sandbox, "__workflowRun", { value: undefined, writable: true, enumerable: true });
+		new vm.Script(wrapped, { filename: filePath }).runInContext(sandbox);
+		const fn = (sandbox as any).__workflowRun as ((...injected: unknown[]) => Promise<unknown>) | undefined;
+		if (typeof fn !== "function") throw new Error("Workflow body did not compile to a runnable function.");
+		return {
+			meta,
+			run: (g) => Promise.resolve(fn(g.agent, g.parallel, g.pipeline, g.phase, g.log, g.workflow, g.args, g.budget)),
+		};
 	} catch (error: any) {
 		throw new Error(`Failed to load ${filePath}: ${error?.message ?? String(error)}`);
 	}
@@ -445,6 +603,7 @@ async function runSingleAgent(run: RunState, agentName: string, options: AgentOp
 
 		const args = ["--mode", "json", "-p", "--no-session"];
 		args.push("--model", options.model ?? agent.model ?? parentModel);
+		if (options.thinking) args.push("--thinking", options.thinking);
 		const tools = options.tools ?? agent.tools;
 		if (tools && tools.length > 0) args.push("--tools", tools.join(","));
 		if (agent.systemPrompt.trim()) {
@@ -572,6 +731,7 @@ function agentCacheKey(run: RunState, agentName: string, options: AgentOptions):
 		task: options.task,
 		cwd: options.cwd ?? run.cwd,
 		model: options.model,
+		thinking: options.thinking,
 		tools: options.tools,
 		agentScope: options.agentScope ?? "user",
 		expectedOutput: options.expectedOutput,
@@ -644,90 +804,208 @@ function safeSendWorkflowMessage(pi: ExtensionAPI, content: string): void {
 	}
 }
 
-function createWorkflowContext(run: RunState, controller: AbortController, parentModel: string) {
-	let agentCount = 0;
+// Maps Claude-style agentType names onto the Pi subagents this runtime can spawn.
+const AGENT_TYPE_ALIASES: Record<string, string> = {
+	"general-purpose": "delegate",
+	general: "delegate",
+	explore: "scout",
+	search: "scout",
+	plan: "planner",
+	"code-reviewer": "reviewer",
+	review: "reviewer",
+	research: "researcher",
+};
+
+function safeDiscoverAgentNames(cwd: string): string[] {
+	try {
+		return discoverAgents(cwd, "user").agents.map((a) => a.name);
+	} catch {
+		return ["delegate"];
+	}
+}
+
+function mapAgentType(agentType: unknown, knownAgents: Set<string>): string {
+	if (typeof agentType !== "string" || !agentType.trim()) return "delegate";
+	const raw = agentType.trim();
+	if (knownAgents.has(raw)) return raw;
+	const alias = AGENT_TYPE_ALIASES[raw.toLowerCase()];
+	if (alias && knownAgents.has(alias)) return alias;
+	return knownAgents.has("delegate") ? "delegate" : raw;
+}
+
+// Pi uses "provider/id" model identifiers; bare Claude aliases (sonnet/opus/...) are ignored
+// so the subagent inherits the parent model rather than failing to resolve.
+function mapModel(model: unknown): string | undefined {
+	return typeof model === "string" && model.includes("/") ? model : undefined;
+}
+
+function mapEffort(effort: unknown): ThinkingLevel | undefined {
+	switch (effort) {
+		case "low": return "low";
+		case "medium": return "medium";
+		case "high": return "high";
+		case "xhigh":
+		case "max": return "xhigh";
+		default: return undefined;
+	}
+}
+
+function createSemaphore(max: number) {
+	let active = 0;
+	const queue: Array<() => void> = [];
 	return {
-		now: run.startedAt,
-		async agent(agentName: string, options: AgentOptions): Promise<AgentResult> {
-			agentCount++;
-			if (agentCount > MAX_AGENTS_PER_RUN) throw new Error(`Workflow exceeded maxAgentsPerRun=${MAX_AGENTS_PER_RUN}`);
-			if (!options?.label || !options?.task) throw new Error("ctx.agent requires stable label and task");
-			return runSingleAgent(run, agentName, options, controller.signal, parentModel);
+		async acquire(): Promise<void> {
+			if (active < max) { active++; return; }
+			await new Promise<void>((resolve) => queue.push(resolve));
+			active++;
 		},
-		async phase<T>(name: string, fn: () => Promise<T>): Promise<T> {
-			const phase: PhaseRecord = { name, status: "running", startedAt: Date.now() };
-			run.currentPhase = name;
-			run.phases.push(phase);
-			await persistRun(run, { type: "phase_start", name });
-			updateUi(run);
-			try {
-				const result = await fn();
-				phase.status = "succeeded";
-				phase.endedAt = Date.now();
-				await persistRun(run, { type: "phase_end", name, status: phase.status });
-				updateUi(run);
-				return result;
-			} catch (error: any) {
-				phase.status = "failed";
-				phase.endedAt = Date.now();
-				await persistRun(run, { type: "phase_end", name, status: phase.status, error: error?.message ?? String(error) });
-				updateUi(run);
-				throw error;
-			}
+		release(): void {
+			active--;
+			const next = queue.shift();
+			if (next) next();
 		},
-		async mapLimit<TIn, TOut>(items: TIn[], limit: number, fn: (item: TIn, index: number) => Promise<TOut>): Promise<TOut[]> {
-			const concurrency = Math.max(1, Math.min(limit, MAX_CONCURRENT_AGENTS, items.length || 1));
-			const results = new Array<TOut>(items.length);
-			let next = 0;
-			const workers = new Array(concurrency).fill(null).map(async () => {
-				while (!controller.signal.aborted) {
-					const index = next++;
-					if (index >= items.length) return;
-					results[index] = await fn(items[index], index);
+	};
+}
+
+function buildAgentTask(prompt: string, schema?: unknown): string {
+	if (schema === undefined) return prompt;
+	return `${prompt}\n\nReturn ONLY a single JSON value matching this JSON Schema, with no prose and no code fence:\n${JSON.stringify(schema)}`;
+}
+
+function parseLooseJson(text: string): unknown {
+	const trimmed = (text ?? "").trim();
+	const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+	const candidate = fence ? fence[1].trim() : trimmed;
+	try { return JSON.parse(candidate); } catch { return null; }
+}
+
+function parseWorkflowArgs(args: string): unknown {
+	const trimmed = (args ?? "").trim();
+	if (!trimmed) return undefined;
+	try { return JSON.parse(trimmed); } catch { return args; }
+}
+
+function formatWorkflowResult(result: unknown): string {
+	if (typeof result === "string") return result;
+	if (result === undefined || result === null) return "(workflow completed with no result)";
+	try { return `\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``; } catch { return String(result); }
+}
+
+function closeOpenPhase(run: RunState, status: RunStatus = "succeeded"): void {
+	const current = run.phases[run.phases.length - 1];
+	if (current && current.status === "running") {
+		current.status = status;
+		current.endedAt = Date.now();
+		void persistRun(run, { type: "phase_end", name: current.name, status });
+	}
+}
+
+// Shared per-run state so nested workflow() calls reuse one concurrency budget and agent counter.
+interface WorkflowEngine {
+	semaphore: ReturnType<typeof createSemaphore>;
+	agentCount: { n: number };
+	labelSeq: { n: number };
+	depth: number;
+}
+
+function resolveNestedWorkflow(nameOrRef: unknown, cwd: string): WorkflowFile {
+	if (nameOrRef && typeof nameOrRef === "object" && typeof (nameOrRef as { scriptPath?: unknown }).scriptPath === "string") {
+		const scriptPath = (nameOrRef as { scriptPath: string }).scriptPath;
+		if (!fs.existsSync(scriptPath)) throw new Error(`workflow() scriptPath not found: ${scriptPath}`);
+		const source = fs.readFileSync(scriptPath, "utf8");
+		return { name: safeName(path.basename(scriptPath).replace(/\.[^.]+$/, "")), path: scriptPath, scope: "user", hash: sha256(source) };
+	}
+	const name = typeof nameOrRef === "string"
+		? nameOrRef
+		: nameOrRef && typeof (nameOrRef as { name?: unknown }).name === "string"
+			? (nameOrRef as { name: string }).name
+			: "";
+	if (!name) throw new Error("workflow(nameOrRef) requires a saved workflow name or { scriptPath }.");
+	const wf = discoverWorkflows(cwd).find((w) => w.name === safeName(name));
+	if (!wf) throw new Error(`Nested workflow not found: ${name}`);
+	return wf;
+}
+
+// Builds the Claude Code workflow-script globals on top of the Pi run machinery.
+function createWorkflowGlobals(
+	run: RunState,
+	controller: AbortController,
+	parentModel: string,
+	knownAgents: Set<string>,
+	args: unknown,
+	engine: WorkflowEngine = { semaphore: createSemaphore(MAX_CONCURRENT_AGENTS), agentCount: { n: 0 }, labelSeq: { n: 0 }, depth: 0 },
+): WorkflowGlobals {
+	const runAgent = async (prompt: string, opts: AgentRunOptions = {}): Promise<unknown> => {
+		if (typeof prompt !== "string" || !prompt.trim()) throw new Error("agent(prompt) requires a non-empty prompt string.");
+		if (controller.signal.aborted) return null;
+		engine.agentCount.n++;
+		if (engine.agentCount.n > MAX_AGENTS_PER_RUN) throw new Error(`Workflow exceeded the per-run agent limit (${MAX_AGENTS_PER_RUN}).`);
+		const label = typeof opts.label === "string" && opts.label.trim() ? opts.label.trim() : `agent-${++engine.labelSeq.n}`;
+		const options: AgentOptions = {
+			label,
+			task: buildAgentTask(prompt, opts.schema),
+			model: mapModel(opts.model),
+			thinking: mapEffort(opts.effort),
+			expectedOutput: opts.schema !== undefined ? "json" : "text",
+			isolation: opts.isolation === "worktree" ? "worktree" : "none",
+		};
+		await engine.semaphore.acquire();
+		let result: AgentResult;
+		try {
+			result = await runSingleAgent(run, mapAgentType(opts.agentType, knownAgents), options, controller.signal, parentModel);
+		} finally {
+			engine.semaphore.release();
+		}
+		if (result.status !== "succeeded") return null;
+		if (opts.schema !== undefined) return result.json ?? parseLooseJson(result.text);
+		return result.text;
+	};
+
+	return {
+		args,
+		budget: { total: null, spent: () => aggregateUsage(run).output, remaining: () => Number.POSITIVE_INFINITY },
+		agent: runAgent,
+		async parallel(thunks) {
+			if (!Array.isArray(thunks)) throw new Error("parallel(thunks) requires an array of functions.");
+			if (thunks.length > 4096) throw new Error("parallel() accepts at most 4096 thunks.");
+			return Promise.all(thunks.map((thunk) => Promise.resolve().then(() => thunk()).catch(() => null)));
+		},
+		async pipeline(items, ...stages) {
+			if (!Array.isArray(items)) throw new Error("pipeline(items, ...stages) requires an array of items.");
+			if (items.length > 4096) throw new Error("pipeline() accepts at most 4096 items.");
+			return Promise.all(items.map(async (item, index) => {
+				try {
+					let prev: unknown = item;
+					for (const stage of stages) prev = await stage(prev, item, index);
+					return prev;
+				} catch {
+					return null;
 				}
-			});
-			await Promise.all(workers);
-			return results;
+			}));
 		},
-		parallel<TIn, TOut>(items: TIn[], fn: (item: TIn, index: number) => Promise<TOut>): Promise<TOut[]> {
-			return this.mapLimit(items, MAX_CONCURRENT_AGENTS, fn);
+		phase(title) {
+			closeOpenPhase(run);
+			const record: PhaseRecord = { name: String(title), status: "running", startedAt: Date.now() };
+			run.currentPhase = String(title);
+			run.phases.push(record);
+			void persistRun(run, { type: "phase_start", name: record.name });
+			updateUi(run);
 		},
-		shard<T>(items: T[], shardCountOrSize: number): T[][] {
-			if (items.length === 0) return [];
-			const n = Math.max(1, Math.floor(shardCountOrSize));
-			const size = n >= items.length ? 1 : Math.ceil(items.length / n);
-			const out: T[][] = [];
-			for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
-			return out;
+		log(message) {
+			void persistRun(run, { type: "log", message: String(message) });
+			updateUi(run);
 		},
-		report(markdown: string, details?: unknown): WorkflowReport {
-			return { markdown, details };
+		async workflow(nameOrRef, subArgs) {
+			if (engine.depth >= 1) throw new Error("workflow() nesting is one level only.");
+			const wf = resolveNestedWorkflow(nameOrRef, run.cwd);
+			const source = await fs.promises.readFile(wf.path, "utf8");
+			const compiled = loadWorkflowFromSource(source, wf.path);
+			await persistRun(run, { type: "nested_workflow_start", name: compiled.meta.name, parent: run.name });
+			const childGlobals = createWorkflowGlobals(run, controller, parentModel, knownAgents, subArgs, { ...engine, depth: engine.depth + 1 });
+			const result = await compiled.run(childGlobals);
+			await persistRun(run, { type: "nested_workflow_end", name: compiled.meta.name });
+			return result;
 		},
-		summarize(results: unknown): string {
-			return JSON.stringify(results, (_key, value) => {
-				if (value && typeof value === "object" && "messages" in value) return { ...value, messages: undefined };
-				return value;
-			}, 2).slice(0, MAX_AGENT_OUTPUT_BYTES);
-		},
-		async log(message: string, details?: unknown): Promise<void> {
-			await persistRun(run, { type: "log", message, details });
-		},
-		async checkpoint(key: string, value: unknown): Promise<void> {
-			await writeJsonFile(path.join(run.runDir, "checkpoints", `${safeName(key)}.json`), value);
-			await persistRun(run, { type: "checkpoint", key });
-		},
-		getCheckpoint(key: string): unknown {
-			return readJsonFile(path.join(run.runDir, "checkpoints", `${safeName(key)}.json`), undefined);
-		},
-		async retry<T>(fn: () => Promise<T>, options?: { retries?: number; delayMs?: number }): Promise<T> {
-			const retries = options?.retries ?? 2;
-			let lastError: unknown;
-			for (let i = 0; i <= retries; i++) {
-				try { return await fn(); } catch (error) { lastError = error; if (i < retries && options?.delayMs) await new Promise((r) => setTimeout(r, options.delayMs)); }
-			}
-			throw lastError;
-		},
-		fail(message: string): never { throw new Error(message); },
 	};
 }
 
@@ -735,13 +1013,14 @@ async function startRun(pi: ExtensionAPI, workflowFile: WorkflowFile, args: stri
 	lastCtx = ctx;
 	lastPi = pi;
 	const source = await fs.promises.readFile(workflowFile.path, "utf8");
-	const def = loadWorkflowFromSource(source, workflowFile.path);
-	const name = safeName(def.name || workflowFile.name);
+	const compiled = loadWorkflowFromSource(source, workflowFile.path);
+	const name = safeName(compiled.meta.name || workflowFile.name);
 	const id = `${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
 	const runDir = path.join(runBaseDir(ctx.cwd), id);
 	const inheritedCache = options?.reuseFrom?.hash === workflowFile.hash && options.reuseFrom.args === args ? options.reuseFrom.agentCache : undefined;
-	const run: RunState = { id, name, workflowPath: workflowFile.path, scope: workflowFile.scope, hash: workflowFile.hash, cwd: ctx.cwd, args, status: "pending", startedAt: Date.now(), phases: [], agents: [], agentCache: inheritedCache ? { ...inheritedCache } : {}, runDir };
+	const run: RunState = { id, name, workflowPath: workflowFile.path, scope: workflowFile.scope, hash: workflowFile.hash, cwd: ctx.cwd, args, status: "pending", startedAt: Date.now(), phases: [], agents: [], agentCache: inheritedCache ? { ...inheritedCache } : {}, runDir, meta: compiled.meta };
 	const parentModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+	const knownAgents = new Set<string>(safeDiscoverAgentNames(ctx.cwd));
 	await fs.promises.mkdir(runDir, { recursive: true });
 	await fs.promises.writeFile(path.join(runDir, "script.ts"), source, "utf8");
 	await persistRun(run, { type: "run_created" });
@@ -758,17 +1037,18 @@ async function startRun(pi: ExtensionAPI, workflowFile: WorkflowFile, args: stri
 		await persistRun(run, { type: "run_start" });
 		updateUi(run);
 		try {
-			const wctx = createWorkflowContext(run, controller, parentModel);
-			const result = await def.run(wctx, args);
-			const report = typeof result === "string" ? result : result.markdown;
+			const globals = createWorkflowGlobals(run, controller, parentModel, knownAgents, parseWorkflowArgs(args));
+			const result = await compiled.run(globals);
+			closeOpenPhase(run);
 			run.status = "succeeded";
-			run.report = report || "(workflow completed with no report)";
+			run.report = formatWorkflowResult(result);
 			run.endedAt = Date.now();
 			await persistRun(run, { type: "run_end", status: run.status, reportBytes: Buffer.byteLength(run.report, "utf8") });
 			const usage = aggregateUsage(run);
 			safeSendWorkflowMessage(pi, `# Workflow complete: ${run.name}\n\n${run.report}\n\n---\nRun: ${run.id}\nAgents: ${run.agents.length}\nUsage: ${usage.turns} turns, $${usage.cost.toFixed(4)}\nDetails: ${run.runDir}`);
 		} catch (error: any) {
 			run.status = controller.signal.aborted ? "cancelled" : "failed";
+			closeOpenPhase(run, run.status);
 			run.error = error?.message ?? String(error);
 			run.endedAt = Date.now();
 			await persistRun(run, { type: "run_end", status: run.status, error: run.error });
@@ -900,25 +1180,39 @@ function workflowRunDetails(run: RunState, agentLabel?: string): string {
 	].join("\n");
 }
 
-const FLOW_GENERATOR_SYSTEM_PROMPT = `You generate Pi workflow scripts.
+const FLOW_GENERATOR_SYSTEM_PROMPT = `You generate workflow scripts for a deterministic multi-agent orchestrator. The script fans work out across many bounded-concurrency subagents.
 
-Return exactly one TypeScript module, with no prose, using this import:
-import { workflow } from "pi-workflows";
+Return exactly one JavaScript module, no prose, no code fence.
 
-Requirements:
-- default export workflow({ name, description, async run(ctx, args) { ... } })
-- stable kebab-case workflow name
-- agents perform repository/tool work via ctx.agent; the script only orchestrates
-- use ctx.phase for named phases
-- use ctx.mapLimit with explicit bounded concurrency for fan-out
-- use stable unique agent labels
-- end by returning ctx.report(markdown)
-- do not import anything except pi-workflows
-- do not use fs, child_process, process, fetch, eval, dynamic import, Date.now, or Math.random
-- include a validation or cross-review phase for audits, research, plans, or risky outputs
+Required shape:
+- Begin with: export const meta = { name, description, phases } — a PURE object literal (no variables, calls, or interpolation). name is stable kebab-case; phases is an array of { title } in run order.
+- After meta, write the orchestration body directly using the injected globals. Top-level await and a top-level return are allowed; the value you return becomes the workflow report (return a markdown string, or an object that will be rendered as JSON).
+- The script only ORCHESTRATES; all repository, tool, and web work happens inside agent() subagents.
 
-Available ctx helpers: agent, phase, mapLimit, parallel, shard, report, summarize, log, checkpoint, getCheckpoint, retry, fail. Use ctx.now for a deterministic run timestamp if needed.
-Available agents: delegate (broad multi-step work; inherits the parent model). Use delegate for every workflow agent stream unless the user explicitly asks for a named specialist.`;
+Injected globals (do not import anything):
+- agent(prompt, opts?) -> Promise<string | object | null>. opts: { label, phase, schema, model, effort, agentType, isolation }. With a schema (a JSON Schema object) it returns the parsed JSON value; otherwise the agent's final text. Returns null if the agent fails.
+- parallel(thunks) -> Promise<any[]>. Runs an array of () => Promise thunks concurrently and awaits them all (a barrier). A failed thunk becomes null.
+- pipeline(items, stage1, stage2, ...) -> Promise<any[]>. Runs each item through all stages independently with NO barrier between stages; each stage receives (prevResult, originalItem, index).
+- phase(title) -> mark the start of a named phase (use titles from meta.phases).
+- log(message) -> emit progress.
+- args -> the parsed workflow arguments.
+- budget -> { total, spent(), remaining() } (total is null unless a token budget was set).
+- workflow(nameOrRef, args?) -> run a saved workflow by name (or { scriptPath }) inline as a sub-step and return its result. Nesting is one level only.
+
+agentType selects the subagent: default "delegate" (general-purpose, inherits project context and the parent model); specialists "scout" (fast read-only recon), "researcher" (web research), "reviewer" (critique/verification), "planner", "oracle". Prefer delegate unless a specialist clearly fits. effort maps to thinking depth (low|medium|high|xhigh|max). isolation:"worktree" gives a file-mutating agent its own git worktree.
+
+Orchestration patterns — pick what the task needs:
+- Pipeline by default: pipeline(items, (prev, item) => agent("find ... " + item), (found) => agent("Verify this finding: " + found, { agentType: "reviewer" })). Each item flows through its stages independently; wall-clock is the slowest single item, not the sum of stages.
+- Barrier only when a stage needs the whole set: collect with await parallel([...]) before the next stage ONLY to dedup/merge across items, early-exit on a zero count, or compare items. Otherwise keep stages inside pipeline.
+- Adversarial verify: for audits, research, plans, or risky outputs, add a verification phase that spawns independent skeptics (or distinct lenses such as correctness, security, reproduction) prompted to REFUTE each finding; keep only findings that survive a majority, defaulting to rejection when uncertain.
+- Judge panel: for design or decision tasks, generate N independent attempts from different angles, score with parallel judges, synthesize from the winner.
+- Loop until dry: for unknown-size discovery, keep spawning finders until K consecutive rounds surface nothing new (dedup against everything seen). Never silently cap at top-N; if you must cap, log() what was dropped.
+
+Scale to the goal: a quick check needs a few agents and one verification pass; "thorough", "comprehensive", or "audit" needs a larger finder pool, a 3-5 way adversarial pass, and a final synthesis stage.
+
+Hard constraints:
+- import nothing; only export const meta.
+- do not use require, process, fetch, eval, dynamic import, Date.now(), Math.random(), or argless new Date(). Vary agent prompts and labels by index instead of relying on randomness.`;
 
 function extractGeneratedScript(text: string): string {
 	const fence = text.match(/```(?:ts|typescript|js|javascript)?\s*([\s\S]*?)```/i);
@@ -1018,6 +1312,50 @@ export default function (pi: ExtensionAPI) {
 			run.endedAt = Date.now();
 			await persistRun(run, { type: "run_interrupted", reason: "session_start" });
 		}
+	});
+
+	pi.on("before_agent_start", async (event, ctx) => {
+		try {
+			if (typeof event.systemPrompt !== "string") return;
+			const addendum = buildWorkflowSystemPromptAddendum(ctx.cwd);
+			if (!addendum) return;
+			return { systemPrompt: `${event.systemPrompt}\n\n${addendum}` };
+		} catch {
+			// Best-effort context injection; never block the agent from starting.
+			return;
+		}
+	});
+
+	pi.registerCommand("workflow-mode", {
+		description: "Standing workflow mode — nudge the agent to orchestrate substantial tasks: /workflow-mode [on|off|auto|status]",
+		handler: async (input, ctx) => {
+			const arg = (input || "").trim().toLowerCase();
+			const describe = () => {
+				const mode = readWorkflowMode();
+				const source = mode.source === "command" ? "set explicitly" : mode.source === "env" ? "from PI_WORKFLOW_MODE" : "default";
+				return `Workflow mode: ${mode.enabled ? "on" : "off"} (${source}).`;
+			};
+			if (arg === "status") {
+				ctx.ui.notify(describe(), "info");
+				return;
+			}
+			if (arg === "auto") {
+				await clearWorkflowMode();
+				ctx.ui.notify(`Cleared explicit workflow mode. ${describe()}`, "info");
+				return;
+			}
+			if (arg === "on" || arg === "off") {
+				await writeWorkflowMode(arg === "on");
+				ctx.ui.notify(describe(), "info");
+				return;
+			}
+			if (arg === "" || arg === "toggle") {
+				await writeWorkflowMode(!readWorkflowMode().enabled);
+				ctx.ui.notify(describe(), "info");
+				return;
+			}
+			ctx.ui.notify("Usage: /workflow-mode [on|off|auto|status]", "warning");
+		},
 	});
 
 	pi.registerCommand("workflow", {
@@ -1126,7 +1464,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				let finalScript = script;
 				let def = loadWorkflowFromSource(finalScript, "<generated>");
-				let name = safeName(def.name);
+				let name = safeName(def.meta.name);
 				let choice = await ctx.ui.select("Generated workflow", [
 					`Run once: ${name}`,
 					`Save to user workflows and run: ${name}`,
@@ -1150,7 +1488,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					finalScript = edited;
 					def = loadWorkflowFromSource(finalScript, "<edited generated>");
-					name = safeName(def.name);
+					name = safeName(def.meta.name);
 					choice = await ctx.ui.select("Run edited workflow", [
 						`Run once: ${name}`,
 						`Save to user workflows and run: ${name}`,
@@ -1179,7 +1517,7 @@ export default function (pi: ExtensionAPI) {
 					scope = "user";
 					await fs.promises.writeFile(filePath, finalScript, "utf8");
 				}
-				const wf: WorkflowFile = { name, path: filePath, scope, hash: sha256(finalScript), description: def.description };
+				const wf: WorkflowFile = { name, path: filePath, scope, hash: sha256(finalScript), description: def.meta.description };
 				if (!(await ensureApproved(wf, ctx))) return;
 				const run = await startRun(pi, wf, "", ctx);
 				ctx.ui.notify(`Started generated workflow ${run.name} (${run.id}).`, "info");
@@ -1260,7 +1598,23 @@ export default function (pi: ExtensionAPI) {
 			await fs.promises.mkdir(dir, { recursive: true });
 			const filePath = path.join(dir, "workflow-test.ts");
 			if (!fs.existsSync(filePath)) {
-				await fs.promises.writeFile(filePath, `import { workflow } from "pi-workflows";\n\nexport default workflow({\n  name: "workflow-test",\n  description: "Run two tiny subagents concurrently",\n  async run(ctx, args) {\n    const tasks = [\n      { label: "pwd", task: "Report the current working directory and do not modify files." },\n      { label: "list", task: "List up to five top-level files or directories and do not modify files." }\n    ];\n    const results = await ctx.phase("parallel smoke test", () =>\n      ctx.mapLimit(tasks, 2, (t) => ctx.agent("delegate", { label: t.label, task: t.task, tools: ["bash"] }))\n    );\n    return ctx.report("## Smoke test results\\n\\n" + results.map((r) => "### " + r.label + "\\n" + r.text).join("\\n\\n"));\n  }\n});\n`, "utf8");
+				await fs.promises.writeFile(
+					filePath,
+					`export const meta = {
+  name: "workflow-test",
+  description: "Run two tiny subagents concurrently",
+  phases: [{ title: "smoke test" }],
+};
+
+phase("smoke test");
+const results = await parallel([
+  () => agent("Report the current working directory. Do not modify any files.", { label: "pwd", agentType: "scout" }),
+  () => agent("List up to five top-level files or directories. Do not modify any files.", { label: "list", agentType: "scout" }),
+]);
+return "## Smoke test results\\n\\n" + results.map((r, i) => "### agent " + (i + 1) + "\\n" + (r || "(no output)")).join("\\n\\n");
+`,
+					"utf8",
+				);
 			}
 			await runNamedWorkflow(pi, "workflow-test", "", ctx);
 		},
@@ -1276,10 +1630,23 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "workflow_run",
 		label: "Workflow Run",
-		description: "Start a Pi workflow in the background. Supports saved workflows, generated workflows, and provided workflow scripts for repeatable multi-subagent orchestration tasks.",
+		description:
+			"Run a multi-subagent workflow in the background. A workflow decomposes a task across many bounded-concurrency Pi subagents for breadth (cover a large surface in parallel), confidence (independent perspectives and adversarial verification before a risky output), or scale (more work than one agent's context can hold) — e.g. broad codebase audits, large migrations, cross-checked research, exhaustive multi-dimension reviews. Modes: 'saved' runs a known workflow by name, 'script' runs an orchestration script you author inline (Claude Code workflow format: `export const meta` + agent/pipeline/parallel/phase globals), 'generate' writes a script from a natural-language goal. Returns immediately with a run id; the final report arrives later as a follow-up message. Prefer doing the work yourself for anything a single agent can finish in this session — launch a workflow only when fan-out, independent verification, or scale genuinely change the outcome.",
 		parameters: WorkflowRunParams,
-		promptSnippet: "Start saved/generated/script Pi workflows for broad multi-agent audits, research, migrations, and validation.",
-		promptGuidelines: ["Use workflow_run for broad codebase audits, large migrations, cross-checked research, or validation tasks that benefit from many bounded-concurrency subagents."],
+		promptSnippet:
+			"Background multi-agent orchestration (saved/script/generated) for breadth, independent verification, or scale — audits, migrations, cross-checked research, exhaustive reviews; not for work one agent can finish inline.",
+		promptGuidelines: [
+			"Decision gate: default to handling tasks yourself. Reach for workflow_run only when the task needs breadth (a surface too large to cover serially), confidence (independent perspectives or adversarial verification before a risky output), or scale (more than one context can hold). If a single agent can finish it in this session, do it directly — do not launch a workflow merely because a task could be parallelised.",
+			"Scout, then orchestrate: discover the work-list inline first (list the files, the diff, the items), then launch a workflow to fan out over it. You don't need to know the shape before the task — only before the orchestration step.",
+			"Scale to the ask: 'find any bugs' → a few finders and one verification pass; 'thoroughly audit' or 'be comprehensive' → a larger finder pool, a 3-5 way adversarial verification pass, then a synthesis stage.",
+			"Mode choice: use mode:'saved' for a known workflow by name; mode:'script' when you can author the orchestration directly (preferred for one-offs — you control the structure); mode:'generate' when you want a script written from a goal and a human can approve it.",
+			"Background semantics: workflow_run returns a run id and the report arrives later as a follow-up. Don't block waiting on it and don't re-run the same workflow to 'check' on it — inspect progress with /workflows or /workflow-show.",
+			"Author pipelines by default: structure multi-stage work as pipeline(items, item => agent('...'), found => agent('Verify this', { agentType: 'reviewer' })). Each item flows through all its stages independently with bounded concurrency — no barrier between stages.",
+			"Use a barrier only when a stage needs the whole set at once (dedup/merge across items, a zero-count early exit, or cross-item comparison): collect with await parallel([...]) before the next stage. Otherwise keep stages inside pipeline.",
+			"Verify adversarially: for audits, research, plans, or risky outputs, add a verification stage that spawns independent skeptics (or distinct lenses — correctness, security, reproduction) prompted to refute each finding, and keep only those that survive a majority.",
+			"Converge, don't truncate: for unknown-size discovery, loop until K consecutive rounds find nothing new rather than capping at top-N; if you must cap, log() what was dropped. End by returning the report value (a markdown string or an object).",
+			"Agents and cost: use stable unique labels and bounded concurrency. Default agent is 'delegate'; use 'reviewer' for verification, 'researcher' for web research, 'scout' for fast read-only recon. Workflows spend real tokens across many agents — scope them to what the request justifies.",
+		],
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			let wf: WorkflowFile | undefined;
 			let generatedScript: string | undefined;
@@ -1293,23 +1660,23 @@ export default function (pi: ExtensionAPI) {
 				if ((params.requireApproval ?? true) && !ctx.hasUI) return { content: [{ type: "text", text: "Generate mode requires interactive approval unless requireApproval=false." }], isError: true };
 				generatedScript = await generateWorkflowScript(params.goal, ctx);
 				const def = loadWorkflowFromSource(generatedScript, "<generated tool workflow>");
-				const name = safeName(def.name);
+				const name = safeName(def.meta.name);
 				const dir = params.save ? USER_WORKFLOW_DIR : path.join(os.tmpdir(), "pi-generated-workflows");
 				await fs.promises.mkdir(dir, { recursive: true });
 				const filePath = path.join(dir, params.save ? `${name}.ts` : `${name}-${Date.now()}.ts`);
 				await fs.promises.writeFile(filePath, generatedScript, "utf8");
-				wf = { name, path: filePath, scope: "user", hash: sha256(generatedScript), description: def.description };
+				wf = { name, path: filePath, scope: "user", hash: sha256(generatedScript), description: def.meta.description };
 			} else if (params.mode === "script") {
 				if (!params.script) return { content: [{ type: "text", text: "Script workflow mode requires script." }], isError: true };
 				if ((params.requireApproval ?? true) && !ctx.hasUI) return { content: [{ type: "text", text: "Script mode requires interactive approval unless requireApproval=false." }], isError: true };
 				generatedScript = params.script;
 				const def = loadWorkflowFromSource(generatedScript, "<tool script workflow>");
-				const name = safeName(def.name);
+				const name = safeName(def.meta.name);
 				const dir = params.save ? USER_WORKFLOW_DIR : path.join(os.tmpdir(), "pi-script-workflows");
 				await fs.promises.mkdir(dir, { recursive: true });
 				const filePath = path.join(dir, params.save ? `${name}.ts` : `${name}-${Date.now()}.ts`);
 				await fs.promises.writeFile(filePath, generatedScript, "utf8");
-				wf = { name, path: filePath, scope: "user", hash: sha256(generatedScript), description: def.description };
+				wf = { name, path: filePath, scope: "user", hash: sha256(generatedScript), description: def.meta.description };
 			}
 
 			if (!wf) return { content: [{ type: "text", text: "Unable to prepare workflow." }], isError: true };
