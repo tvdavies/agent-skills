@@ -70,19 +70,24 @@ export class SlackBridge {
 		this.ws = undefined;
 	}
 
-	/** Post a reply into the originating Slack thread. */
-	async postReply(origin: SlackOrigin, text: string): Promise<boolean> {
+	/** Post a message to a channel (optionally threaded). */
+	async postMessage(channel: string, text: string, threadTs?: string): Promise<boolean> {
 		const res = await this.fetchFn(`${SLACK_API}/chat.postMessage`, {
 			method: "POST",
 			headers: {
 				authorization: `Bearer ${this.o.botToken}`,
 				"content-type": "application/json; charset=utf-8",
 			},
-			body: JSON.stringify({ channel: origin.channel, text, thread_ts: origin.threadTs }),
+			body: JSON.stringify({ channel, text, thread_ts: threadTs }),
 		});
 		const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
 		if (!data.ok) this.o.logger?.(`[slack] postMessage failed: ${data.error ?? "unknown"}`);
 		return data.ok === true;
+	}
+
+	/** Post a reply into the originating Slack thread. */
+	postReply(origin: SlackOrigin, text: string): Promise<boolean> {
+		return this.postMessage(origin.channel, text, origin.threadTs);
 	}
 
 	private async openSocket(): Promise<void> {

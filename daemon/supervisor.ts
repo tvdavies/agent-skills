@@ -53,6 +53,8 @@ export type SupervisorOptions = {
 	onForward?: (trigger: Trigger) => void;
 	/** Post a reply for a trigger that had an origin (e.g. a Slack thread). */
 	onReply?: (origin: TriggerOrigin, text: string) => void;
+	/** When it returns true, forwarding is paused (e.g. the daily spend cap). */
+	gate?: () => boolean;
 	/** A run longer than this (ms) resets the restart backoff. */
 	stableResetMs?: number;
 };
@@ -61,9 +63,9 @@ type LastTrigger = { text: string; source?: string; at: string };
 
 export class Supervisor {
 	private readonly o: Required<
-		Omit<SupervisorOptions, "onForward" | "instance" | "onReply">
+		Omit<SupervisorOptions, "onForward" | "instance" | "onReply" | "gate">
 	> &
-		Pick<SupervisorOptions, "onForward" | "instance" | "onReply">;
+		Pick<SupervisorOptions, "onForward" | "instance" | "onReply" | "gate">;
 	private client: RpcClient | undefined;
 	private readonly pendingOrigins: TriggerOrigin[] = [];
 	private stopping = false;
@@ -88,6 +90,7 @@ export class Supervisor {
 			stableResetMs: options.stableResetMs ?? 60_000,
 			onForward: options.onForward,
 			onReply: options.onReply,
+			gate: options.gate,
 			instance: options.instance,
 		};
 	}
@@ -116,6 +119,9 @@ export class Supervisor {
 
 	/** Drain the inbox and forward each trigger. Public for deterministic tests. */
 	pollInbox(): void {
+		// Paused (e.g. over the daily spend cap): leave triggers queued in the
+		// inbox so they are picked up once forwarding resumes.
+		if (this.o.gate?.()) return;
 		const fresh = this.o.inbox.drain();
 		if (fresh.length === 0) return;
 		for (const trigger of fresh) {

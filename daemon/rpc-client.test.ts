@@ -52,6 +52,17 @@ describe("RpcClient e2e (fake-pi)", () => {
 		expect(readFileSync(logPath, "utf8")).toContain("UIRESP cancelled");
 	});
 
+	it("correlates a request with its response", async () => {
+		client = new RpcClient({
+			command: process.execPath,
+			args: [FIXTURE],
+			env: { ...process.env, FAKE_PI_LOG: logPath, FAKE_PI_COST: "2.5" },
+		});
+		client.start();
+		const resp = (await client.request({ type: "get_session_stats" })) as { data?: { cost?: number } };
+		expect(resp?.data?.cost).toBe(2.5);
+	});
+
 	it("stops the child cleanly", async () => {
 		startClient();
 		client.submit("hello");

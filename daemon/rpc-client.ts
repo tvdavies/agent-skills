@@ -48,6 +48,7 @@ const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 export class RpcClient extends EventEmitter {
 	private child: ChildProcess | undefined;
 	private streaming = false;
+	private reqSeq = 0;
 	private readonly framer = new JsonlFramer();
 	private readonly options: RpcClientOptions;
 
@@ -109,6 +110,30 @@ export class RpcClient extends EventEmitter {
 	/** Send a raw RPC command. */
 	send(command: Record<string, unknown>): void {
 		this.child?.stdin?.write(encodeCommand(command));
+	}
+
+	/** Send a command and resolve with its id-correlated response (or undefined on timeout). */
+	request(command: Record<string, unknown>, timeoutMs = 10_000): Promise<RpcEvent | undefined> {
+		this.reqSeq += 1;
+		const id = `req-${this.reqSeq}`;
+		return new Promise((resolve) => {
+			const onResponse = (event: RpcEvent) => {
+				if ((event as { id?: string }).id === id) {
+					cleanup();
+					resolve(event);
+				}
+			};
+			const cleanup = () => {
+				this.off("response", onResponse);
+				clearTimeout(timer);
+			};
+			const timer = setTimeout(() => {
+				cleanup();
+				resolve(undefined);
+			}, timeoutMs);
+			this.on("response", onResponse);
+			this.send({ ...command, id });
+		});
 	}
 
 	/** Abort any running turn, then terminate the child (SIGKILL fallback). */

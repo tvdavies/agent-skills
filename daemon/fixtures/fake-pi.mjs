@@ -50,6 +50,15 @@ function handle(cmd) {
 		case "abort":
 			send({ type: "response", command: "abort", success: true });
 			return;
+		case "get_session_stats":
+			send({
+				type: "response",
+				command: "get_session_stats",
+				id: cmd.id,
+				success: true,
+				data: { cost: Number(process.env.FAKE_PI_COST ?? 0) },
+			});
+			return;
 		default:
 			send({ type: "response", command: cmd.type ?? "unknown", success: true });
 	}

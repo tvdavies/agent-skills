@@ -16,13 +16,18 @@
  * AGENT_TOOLKIT_PI_BIN.
  */
 
-import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { CronJobStore } from "../extensions/cron/jobs.ts";
 import { recordDecision, stateDir } from "../extensions/lib/decisions.ts";
+import { notify } from "../extensions/lib/notify.ts";
 import { brainRoot } from "../extensions/lib/paths.ts";
+import { applyCumulativeCost, INITIAL_SPEND_STATE, type SpendState } from "../extensions/lib/spend.ts";
+import { Dashboard } from "../daemon/dashboard.ts";
 import { checkEnvFileSecurity } from "../daemon/env-secure.ts";
 import { FileInbox } from "../daemon/inbox.ts";
+import { NotifyWatcher } from "../daemon/notify-watcher.ts";
 import {
 	type ProvisionConfig,
 	renderEnvFile,
@@ -154,12 +159,19 @@ function runDaemon(): void {
 		};
 	}
 
+	// Spend cap: when configured, pause forwarding once the daily cap is hit.
+	let currentClient: RpcClient | undefined;
+	let paused = false;
+	const dailyCapUsd = Number(process.env.AGENT_TOOLKIT_DAILY_CAP_USD ?? 0);
+
 	const supervisor = new Supervisor({
 		instance,
 		statusPath,
 		inbox,
-		createClient: () =>
-			new RpcClient({ command: piBin, args: piArgs, cwd: repoDir, logger: (m) => console.error(m) }),
+		createClient: () => {
+			currentClient = new RpcClient({ command: piBin, args: piArgs, cwd: repoDir, logger: (m) => console.error(m) });
+			return currentClient;
+		},
 		onForward: (trigger) =>
 			recordDecision({
 				kind: "trigger",
@@ -168,8 +180,31 @@ function runDaemon(): void {
 				detail: trigger.taduTask ? { taduTask: trigger.taduTask } : undefined,
 			}),
 		onReply,
+		gate: () => paused,
 	});
 	supervisor.start();
+
+	let spendTimer: ReturnType<typeof setInterval> | undefined;
+	if (dailyCapUsd > 0) {
+		const spendPath = join(state, "spend-state.json");
+		let spendState: SpendState = (readJson(spendPath) as SpendState | null) ?? INITIAL_SPEND_STATE;
+		spendTimer = setInterval(async () => {
+			if (!currentClient) return;
+			const resp = (await currentClient.request({ type: "get_session_stats" })) as { data?: { cost?: number } } | undefined;
+			const cost = resp?.data?.cost;
+			if (typeof cost !== "number") return;
+			const result = applyCumulativeCost(spendState, cost, { dailyCapUsd }, Date.now());
+			spendState = result.state;
+			writeJson(spendPath, spendState);
+			paused = result.overCap;
+			if (result.justCrossed) {
+				notify(
+					{ summary: `Daily spend cap $${dailyCapUsd} reached; pausing autonomous work until tomorrow.`, kind: "escalate", source: "spend" },
+					{ force: true },
+				);
+			}
+		}, 60_000);
+	}
 
 	// Webhook listener (only when a secret is configured).
 	const webhook =
@@ -188,12 +223,41 @@ function runDaemon(): void {
 	if (webhook) void webhook.start();
 	if (slack) void slack.connect().catch((e) => console.error(`[slack] connect failed: ${e}`));
 
+	// Notify-watcher: deliver the push channel to Slack (when a channel is set).
+	const notifyChannel = process.env.SLACK_NOTIFY_CHANNEL;
+	let notifyWatcher: NotifyWatcher | undefined;
+	if (slack && notifyChannel) {
+		const bridge = slack;
+		notifyWatcher = new NotifyWatcher({
+			post: (text) => {
+				void bridge.postMessage(notifyChannel, text);
+			},
+			logger: (m) => console.error(m),
+		});
+		notifyWatcher.start();
+	}
+
+	// Oversight dashboard (loopback).
+	const dashboard = new Dashboard({
+		enqueue: (text) => inbox.append({ text, source: "dashboard" }),
+		statusPath,
+		cronJobs: () =>
+			new CronJobStore().list().map((j) => ({ id: j.id, schedule: j.schedule, description: j.description })),
+		token: process.env.AGENT_TOOLKIT_DASHBOARD_TOKEN,
+		port: Number(process.env.AGENT_TOOLKIT_DASHBOARD_PORT ?? 8788),
+		logger: (m) => console.error(m),
+	});
+	void dashboard.start();
+
 	console.error(
-		`[toolkit-daemon] started (instance=${instance}, slack=${slack ? "on" : "off"}, webhook=${webhook ? "on" : "off"})`,
+		`[toolkit-daemon] started (instance=${instance}, slack=${slack ? "on" : "off"}, webhook=${webhook ? "on" : "off"}, dashboard=on, spendCap=${dailyCapUsd > 0 ? `$${dailyCapUsd}` : "off"})`,
 	);
 
 	const shutdown = async () => {
 		console.error("[toolkit-daemon] shutting down…");
+		if (spendTimer) clearInterval(spendTimer);
+		notifyWatcher?.stop();
+		await dashboard.stop();
 		await supervisor.stop();
 		slack?.stop();
 		await webhook?.stop();
@@ -201,6 +265,24 @@ function runDaemon(): void {
 	};
 	process.on("SIGTERM", shutdown);
 	process.on("SIGINT", shutdown);
+}
+
+function readJson(path: string): unknown {
+	if (!existsSync(path)) return null;
+	try {
+		return JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return null;
+	}
+}
+
+function writeJson(path: string, value: unknown): void {
+	try {
+		mkdirSync(join(path, ".."), { recursive: true });
+		writeFileSync(path, JSON.stringify(value), "utf8");
+	} catch {
+		// best-effort
+	}
 }
 
 function main(): void {

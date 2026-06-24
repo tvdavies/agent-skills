@@ -111,6 +111,33 @@ describe("Supervisor (unit, fake client + injected timers)", () => {
 		expect(replies[0]?.origin.channel).toBe("C1");
 	});
 
+	it("pauses forwarding (does not drain) when the gate is closed", () => {
+		let drained = 0;
+		const clients: FakeClient[] = [];
+		const sup = new Supervisor({
+			createClient: () => {
+				const c = new FakeClient();
+				clients.push(c);
+				return c as unknown as RpcClient;
+			},
+			inbox: {
+				drain() {
+					drained += 1;
+					return [{ id: "1", text: "x" }];
+				},
+			},
+			statusPath: join(dir, "status.json"),
+			pollMs: 0,
+			statusMs: 0,
+			now: () => 1000,
+			gate: () => true,
+		});
+		sup.start();
+		sup.pollInbox();
+		expect(drained).toBe(0);
+		expect(clients[0]?.submitted).toEqual([]);
+	});
+
 	it("respawns with backoff after the client exits", () => {
 		const timers: { fn: () => void; ms: number }[] = [];
 		let created = 0;

@@ -14,6 +14,12 @@ executables that wire them together.
 - `toolkit-trigger.ts` — appends a trigger to `inbox.jsonl` (the reliable
   transport the daemon drains) and, when a TADU workspace is present, also
   creates a TADU task for visibility (best-effort).
+- `toolkit-digest.ts` — a deterministic (no-LLM) summary of the decision spine
+  over a window, pushed to the notify channel and printed. Schedule via cron or
+  run by hand.
+
+The daemon also serves the oversight **dashboard** (loopback `:8788`), delivers
+the **notify** push channel to Slack, and enforces the **daily spend cap**.
 
 Cron, Slack (Phase 3), and you all poke the agent through `toolkit-trigger`.
 
@@ -87,6 +93,11 @@ Ingestion (Phase 3): `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_ALLOWED_USERS`
 Slack/webhook listeners start only when their tokens/secrets are present. Secrets
 belong in the 0600 env file; the daemon refuses to start if that file is
 group/world accessible.
+
+Oversight (Phase 4): `AGENT_TOOLKIT_DASHBOARD_PORT` (default 8788),
+`AGENT_TOOLKIT_DASHBOARD_TOKEN` (optional bearer), `SLACK_NOTIFY_CHANNEL`
+(where the notify push channel is delivered), `AGENT_TOOLKIT_DAILY_CAP_USD`
+(daily spend cap; unset/0 disables).
 
 ## Tests
 

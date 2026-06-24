@@ -19,6 +19,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { recordDecision, stateDir } from "../lib/decisions.ts";
+import { notify } from "../lib/notify.ts";
 import { HandledStore } from "./handled.ts";
 import { buildHeartbeatPrompt, isHeartbeatPrompt } from "./protocol.ts";
 
@@ -172,11 +173,12 @@ export default function heartbeatExtension(pi: ExtensionAPI): void {
 			const ttlMs = (params.ttlHours ?? 24) * 3_600_000;
 			for (const key of params.handled ?? []) store.add(key, ttlMs);
 			appendHeartbeatLog(params.attention ? `[ATTENTION] ${summary}` : summary);
-			recordDecision({
-				kind: params.attention ? "escalate" : "heartbeat",
-				summary,
-				source: "heartbeat",
-			});
+			if (params.attention) {
+				// Escalation: record + push (rate-limited) through the notify channel.
+				notify({ summary, kind: "escalate", source: "heartbeat" });
+			} else {
+				recordDecision({ kind: "heartbeat", summary, source: "heartbeat" });
+			}
 			noteRecorded = true;
 			if (params.attention && ctx.hasUI) ctx.ui.notify(`Heartbeat escalation: ${summary}`, "warning");
 			return {
