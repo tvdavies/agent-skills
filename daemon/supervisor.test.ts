@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileInbox, type Trigger } from "./inbox";
 import { RpcClient } from "./rpc-client";
-import { Supervisor } from "./supervisor";
+import { lastAssistantText, Supervisor } from "./supervisor";
 
 const FIXTURE = join(import.meta.dir, "fixtures", "fake-pi.mjs");
 
@@ -76,6 +76,41 @@ describe("Supervisor (unit, fake client + injected timers)", () => {
 		expect(existsSync(join(dir, "status.json"))).toBe(true);
 	});
 
+	it("pairs a slack-origin trigger with the next agent_end and replies", () => {
+		let pending: Trigger[] = [
+			{ id: "1", text: "hello", origin: { kind: "slack", channel: "C1", threadTs: "t1", user: "U" } },
+		];
+		const clients: FakeClient[] = [];
+		const replies: { origin: any; text: string }[] = [];
+		const sup = new Supervisor({
+			createClient: () => {
+				const c = new FakeClient();
+				clients.push(c);
+				return c as unknown as RpcClient;
+			},
+			inbox: {
+				drain() {
+					const t = pending;
+					pending = [];
+					return t;
+				},
+			},
+			statusPath: join(dir, "status.json"),
+			pollMs: 0,
+			statusMs: 0,
+			now: () => 1000,
+			onReply: (origin, text) => replies.push({ origin, text }),
+		});
+		sup.start();
+		sup.pollInbox();
+		clients[0]?.emit("agent_end", {
+			messages: [{ role: "assistant", content: [{ type: "text", text: "done!" }] }],
+		});
+		expect(replies).toHaveLength(1);
+		expect(replies[0]?.text).toBe("done!");
+		expect(replies[0]?.origin.channel).toBe("C1");
+	});
+
 	it("respawns with backoff after the client exits", () => {
 		const timers: { fn: () => void; ms: number }[] = [];
 		let created = 0;
@@ -110,6 +145,19 @@ describe("Supervisor (unit, fake client + injected timers)", () => {
 
 		const status = JSON.parse(readFileSync(join(dir, "status.json"), "utf8"));
 		expect(status.restarts).toBe(1);
+	});
+});
+
+describe("lastAssistantText", () => {
+	it("extracts the last assistant message's text", () => {
+		expect(
+			lastAssistantText([
+				{ role: "user", content: "hi" },
+				{ role: "assistant", content: [{ type: "thinking", thinking: "x" }, { type: "text", text: "answer" }] },
+			]),
+		).toBe("answer");
+		expect(lastAssistantText([{ role: "assistant", content: "plain" }])).toBe("plain");
+		expect(lastAssistantText([])).toBeUndefined();
 	});
 });
 

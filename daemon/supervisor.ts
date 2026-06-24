@@ -14,8 +14,26 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { backoffDelay } from "./backoff.ts";
-import type { Trigger } from "./inbox.ts";
+import type { Trigger, TriggerOrigin } from "./inbox.ts";
 import type { RpcClient } from "./rpc-client.ts";
+
+/** Extract the concatenated text of the last assistant message in a run. */
+export function lastAssistantText(messages: unknown[]): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		const message = messages[i] as { role?: string; content?: unknown };
+		if (message?.role !== "assistant") continue;
+		if (typeof message.content === "string") return message.content.trim() || undefined;
+		if (Array.isArray(message.content)) {
+			const text = message.content
+				.filter((part: any) => part?.type === "text")
+				.map((part: any) => String(part.text ?? ""))
+				.join("")
+				.trim();
+			return text || undefined;
+		}
+	}
+	return undefined;
+}
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -33,6 +51,8 @@ export type SupervisorOptions = {
 	clearTimer?: (handle: TimerHandle) => void;
 	/** Hook invoked for each forwarded trigger (e.g. to record a decision). */
 	onForward?: (trigger: Trigger) => void;
+	/** Post a reply for a trigger that had an origin (e.g. a Slack thread). */
+	onReply?: (origin: TriggerOrigin, text: string) => void;
 	/** A run longer than this (ms) resets the restart backoff. */
 	stableResetMs?: number;
 };
@@ -41,10 +61,11 @@ type LastTrigger = { text: string; source?: string; at: string };
 
 export class Supervisor {
 	private readonly o: Required<
-		Omit<SupervisorOptions, "onForward" | "instance">
+		Omit<SupervisorOptions, "onForward" | "instance" | "onReply">
 	> &
-		Pick<SupervisorOptions, "onForward" | "instance">;
+		Pick<SupervisorOptions, "onForward" | "instance" | "onReply">;
 	private client: RpcClient | undefined;
+	private readonly pendingOrigins: TriggerOrigin[] = [];
 	private stopping = false;
 	private restarts = 0;
 	private consecutiveFailures = 0;
@@ -66,6 +87,7 @@ export class Supervisor {
 			clearTimer: options.clearTimer ?? ((h) => clearTimeout(h)),
 			stableResetMs: options.stableResetMs ?? 60_000,
 			onForward: options.onForward,
+			onReply: options.onReply,
 			instance: options.instance,
 		};
 	}
@@ -98,6 +120,7 @@ export class Supervisor {
 		if (fresh.length === 0) return;
 		for (const trigger of fresh) {
 			this.client?.submit(trigger.text);
+			if (trigger.origin) this.pendingOrigins.push(trigger.origin);
 			this.lastTrigger = {
 				text: trigger.text,
 				source: trigger.source,
@@ -113,8 +136,19 @@ export class Supervisor {
 		this.client = client;
 		this.startedAtMs = this.o.now();
 		client.on("exit", () => this.handleExit());
-		client.on("agent_end", () => this.writeStatus());
+		client.on("agent_end", (event: unknown) => this.handleAgentEnd(event));
 		client.start();
+	}
+
+	/** On run completion, post a reply for the oldest pending origin (FIFO). */
+	private handleAgentEnd(event: unknown): void {
+		this.writeStatus();
+		const onReply = this.o.onReply;
+		if (!onReply || this.pendingOrigins.length === 0) return;
+		const origin = this.pendingOrigins.shift();
+		const messages = (event as { messages?: unknown[] })?.messages ?? [];
+		const text = lastAssistantText(messages);
+		if (origin && text) onReply(origin, text);
 	}
 
 	private handleExit(): void {

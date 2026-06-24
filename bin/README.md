@@ -24,6 +24,33 @@ interactive TTY). You interact with it through `toolkit-trigger`, `/status`,
 the decision log, and — later — Slack and the dashboard. The daemon runs under
 `systemd --user` so it survives logout/reboot.
 
+## Event ingestion (Slack & webhooks)
+
+External signals reach the agent through the same inbox the daemon drains.
+
+- **Slack (preferred): Socket Mode.** An *outbound* WebSocket — no inbound port
+  or tunnel. Set `SLACK_APP_TOKEN` (xapp-…, Socket Mode) and `SLACK_BOT_TOKEN`
+  (xoxb-…) plus `SLACK_ALLOWED_USERS` (comma-separated Slack user ids — the
+  allowlist is the security boundary, since the agent runs `--yolo`). A DM or
+  `@mention` from an allowed user becomes a trigger; the agent's reply is posted
+  back to that thread.
+- **Generic webhooks (loopback).** With `WEBHOOK_SECRET` set, `POST /trigger`
+  on `127.0.0.1:8787` with header `x-toolkit-secret: <secret>` and `{"text": …}`
+  queues a trigger. `POST /slack/events` is also served (HMAC-verified with
+  `SLACK_SIGNING_SECRET`) for Slack Events-API setups; Socket Mode is preferred.
+
+Built on Node's built-in `WebSocket` + `fetch` — no Slack SDK dependency.
+
+### Deferred Slack-app setup (do this yourself)
+
+1. Create a Slack app; enable **Socket Mode**; add an app-level token with
+   `connections:write` → `SLACK_APP_TOKEN`.
+2. Add bot scopes (`chat:write`, `app_mentions:read`, `im:history`, …); install
+   to the workspace → `SLACK_BOT_TOKEN`.
+3. Subscribe to bot events (`message.im`, `app_mention`).
+4. Put the tokens + `SLACK_ALLOWED_USERS` in the 0600 env file, then restart the
+   daemon. Nothing here creates the Slack app for you.
+
 ## Install is deferred
 
 Nothing here installs system services automatically. Render the artefacts, then
@@ -51,8 +78,15 @@ node --experimental-transform-types --no-warnings bin/toolkit-trigger.ts "advanc
 
 ## Config (environment)
 
-`AGENT_TOOLKIT_INSTANCE`, `AGENT_TOOLKIT_STATE_DIR`, `AGENT_TOOLKIT_SESSION_DIR`,
-`AGENT_TOOLKIT_BRAIN_ROOT`, `AGENT_TOOLKIT_MODEL`, `AGENT_TOOLKIT_PI_BIN`.
+Core: `AGENT_TOOLKIT_INSTANCE`, `AGENT_TOOLKIT_STATE_DIR`,
+`AGENT_TOOLKIT_SESSION_DIR`, `AGENT_TOOLKIT_BRAIN_ROOT`, `AGENT_TOOLKIT_MODEL`,
+`AGENT_TOOLKIT_PI_BIN`.
+
+Ingestion (Phase 3): `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_ALLOWED_USERS`,
+`SLACK_BOT_USER_ID`, `SLACK_SIGNING_SECRET`, `WEBHOOK_SECRET`, `WEBHOOK_PORT`.
+Slack/webhook listeners start only when their tokens/secrets are present. Secrets
+belong in the 0600 env file; the daemon refuses to start if that file is
+group/world accessible.
 
 ## Tests
 

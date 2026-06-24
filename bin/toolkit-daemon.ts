@@ -16,11 +16,12 @@
  * AGENT_TOOLKIT_PI_BIN.
  */
 
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { recordDecision, stateDir } from "../extensions/lib/decisions.ts";
 import { brainRoot } from "../extensions/lib/paths.ts";
+import { checkEnvFileSecurity } from "../daemon/env-secure.ts";
 import { FileInbox } from "../daemon/inbox.ts";
 import {
 	type ProvisionConfig,
@@ -30,7 +31,13 @@ import {
 	renderSystemdUnit,
 } from "../daemon/provision.ts";
 import { RpcClient } from "../daemon/rpc-client.ts";
+import { SlackBridge } from "../daemon/slack.ts";
 import { Supervisor } from "../daemon/supervisor.ts";
+import { WebhookServer } from "../daemon/webhook-server.ts";
+
+function csv(value: string | undefined): string[] {
+	return (value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+}
 
 const repoDir = join(import.meta.dirname, "..");
 const instance = process.env.AGENT_TOOLKIT_INSTANCE ?? "agent-toolkit";
@@ -93,23 +100,66 @@ function writeUnits(targetDir: string): void {
 	);
 }
 
+/** Refuse to start if the secrets env file is world/group accessible. */
+function enforceEnvSecurity(): void {
+	const envFile = provisionConfig().envFile;
+	const uid = process.getuid?.();
+	if (!existsSync(envFile) || uid === undefined) return;
+	const st = statSync(envFile);
+	const result = checkEnvFileSecurity({ mode: st.mode, uid: st.uid }, uid);
+	if (!result.ok) {
+		console.error(`[toolkit-daemon] refusing to start: ${result.reason} (${envFile})`);
+		process.exit(1);
+	}
+}
+
 function runDaemon(): void {
+	enforceEnvSecurity();
 	const inbox = new FileInbox(join(state, "inbox.jsonl"));
 	const statusPath = join(state, "daemon-status.json");
 	const piArgs = ["--mode", "rpc", "--continue", "--yolo", "--session-dir", sessionDir];
 	if (model) piArgs.push("--model", model);
+
+	const slackConfig = {
+		allowedUsers: csv(process.env.SLACK_ALLOWED_USERS),
+		botUserId: process.env.SLACK_BOT_USER_ID,
+	};
+	const ingest = (t: { text: string; source: string; origin?: any }) =>
+		inbox.append({ text: t.text, source: t.source, origin: t.origin });
+
+	// Slack Socket Mode bridge (only when configured).
+	const slack =
+		process.env.SLACK_APP_TOKEN && process.env.SLACK_BOT_TOKEN
+			? new SlackBridge({
+					appToken: process.env.SLACK_APP_TOKEN,
+					botToken: process.env.SLACK_BOT_TOKEN,
+					slack: slackConfig,
+					onTrigger: ingest,
+					logger: (m) => console.error(m),
+				})
+			: undefined;
+
+	let onReply:
+		| ((origin: { kind: string; channel?: string; threadTs?: string; user?: string }, text: string) => void)
+		| undefined;
+	if (slack) {
+		const bridge = slack;
+		onReply = (origin, text) => {
+			if (origin.kind === "slack" && origin.channel) {
+				void bridge.postReply(
+					{ kind: "slack", channel: origin.channel, threadTs: origin.threadTs, user: origin.user ?? "" },
+					text,
+				);
+			}
+		};
+	}
 
 	const supervisor = new Supervisor({
 		instance,
 		statusPath,
 		inbox,
 		createClient: () =>
-			new RpcClient({
-				command: piBin,
-				args: piArgs,
-				cwd: repoDir,
-				logger: (message) => console.error(message),
-			}),
+			new RpcClient({ command: piBin, args: piArgs, cwd: repoDir, logger: (m) => console.error(m) }),
 		onForward: (trigger) =>
 			recordDecision({
 				kind: "trigger",
@@ -117,14 +167,36 @@ function runDaemon(): void {
 				source: trigger.source,
 				detail: trigger.taduTask ? { taduTask: trigger.taduTask } : undefined,
 			}),
+		onReply,
 	});
-
 	supervisor.start();
-	console.error(`[toolkit-daemon] started (instance=${instance}, state=${state})`);
+
+	// Webhook listener (only when a secret is configured).
+	const webhook =
+		process.env.WEBHOOK_SECRET || process.env.SLACK_SIGNING_SECRET
+			? new WebhookServer({
+					config: {
+						sharedSecret: process.env.WEBHOOK_SECRET,
+						slackSigningSecret: process.env.SLACK_SIGNING_SECRET,
+						slack: slackConfig,
+					},
+					onTrigger: ingest,
+					port: Number(process.env.WEBHOOK_PORT ?? 8787),
+					logger: (m) => console.error(m),
+				})
+			: undefined;
+	if (webhook) void webhook.start();
+	if (slack) void slack.connect().catch((e) => console.error(`[slack] connect failed: ${e}`));
+
+	console.error(
+		`[toolkit-daemon] started (instance=${instance}, slack=${slack ? "on" : "off"}, webhook=${webhook ? "on" : "off"})`,
+	);
 
 	const shutdown = async () => {
 		console.error("[toolkit-daemon] shutting down…");
 		await supervisor.stop();
+		slack?.stop();
+		await webhook?.stop();
 		process.exit(0);
 	};
 	process.on("SIGTERM", shutdown);

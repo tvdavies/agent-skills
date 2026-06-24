@@ -15,6 +15,15 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+/** Where a trigger came from, used to route a reply back to its source. */
+export type TriggerOrigin = {
+	/** e.g. "slack", "webhook". */
+	kind: string;
+	channel?: string;
+	threadTs?: string;
+	user?: string;
+};
+
 /** One unit of work to hand to the agent. */
 export type Trigger = {
 	id: string;
@@ -28,6 +37,8 @@ export type Trigger = {
 	dedupeKey?: string;
 	/** Linked TADU task id, when one was created for visibility. */
 	taduTask?: string;
+	/** Reply destination, for triggers that expect a response (e.g. a Slack DM). */
+	origin?: TriggerOrigin;
 };
 
 /** Drop triggers already seen (by dedupeKey, else id). Mutates `seen`; returns fresh. */
@@ -61,6 +72,7 @@ export class FileInbox {
 			...(input.source ? { source: input.source } : {}),
 			...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
 			...(input.taduTask ? { taduTask: input.taduTask } : {}),
+			...(input.origin ? { origin: input.origin } : {}),
 		};
 		mkdirSync(dirname(this.path), { recursive: true });
 		appendFileSync(this.path, `${JSON.stringify(trigger)}\n`, "utf8");
