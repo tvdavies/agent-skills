@@ -2,7 +2,7 @@
  * Guardrails extension — the safety floor for autonomous operation.
  *
  * Subscribes to `tool_call` and blocks destructive/irreversible operations even
- * under `--yolo`. Pairs with the "high autonomy, notify-after" policy: the agent
+ * without pi approval prompts. Pairs with the "high autonomy, notify-after" policy: the agent
  * acts on everything except genuinely dangerous ops (which are blocked) and, at
  * lower autonomy levels, gates the "confirm" tier behind a prompt (interactive)
  * or a block+escalate (headless). All blocks and notify-after escalations are

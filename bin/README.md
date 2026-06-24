@@ -37,7 +37,7 @@ External signals reach the agent through the same inbox the daemon drains.
 - **Slack (preferred): Socket Mode.** An *outbound* WebSocket — no inbound port
   or tunnel. Set `SLACK_APP_TOKEN` (xapp-…, Socket Mode) and `SLACK_BOT_TOKEN`
   (xoxb-…) plus `SLACK_ALLOWED_USERS` (comma-separated Slack user ids — the
-  allowlist is the security boundary, since the agent runs `--yolo`). A DM or
+  allowlist is the security boundary, since the agent runs without approval prompts). A DM or
   `@mention` from an allowed user becomes a trigger; the agent's reply is posted
   back to that thread.
 - **Generic webhooks (loopback).** With `WEBHOOK_SECRET` set, `POST /trigger`

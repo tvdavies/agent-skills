@@ -74,8 +74,7 @@ notify-watcher delivers new notices to Slack.
 High autonomy, notify-after: the agent acts end-to-end (including outward,
 recoverable actions) and reports. The floor:
 
-- **Guardrails** (`tool_call` hook) block destructive/banned ops even under
-  `--yolo` (`rm -rf /`, `sudo`, force-push to protected branches, prod deploy,
+- **Guardrails** (`tool_call` hook) block destructive/banned ops even though pi has no approval prompts (`rm -rf /`, `sudo`, force-push to protected branches, prod deploy,
   DB drops, `curl|bash`, …). Autonomy levels (`high`/`balanced`/`conservative`)
   soften the "confirm" tier.
 - **Spend cap** — the daemon polls `get_session_stats`, and once the daily cap

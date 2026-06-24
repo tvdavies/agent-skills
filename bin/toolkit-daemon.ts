@@ -122,7 +122,9 @@ function runDaemon(): void {
 	enforceEnvSecurity();
 	const inbox = new FileInbox(join(state, "inbox.jsonl"));
 	const statusPath = join(state, "daemon-status.json");
-	const piArgs = ["--mode", "rpc", "--continue", "--yolo", "--session-dir", sessionDir];
+	// pi 0.75.5 has no tool-permission prompts; tools run headlessly and the
+	// guardrails extension is the safety floor (no --yolo flag exists/needed).
+	const piArgs = ["--mode", "rpc", "--continue", "--session-dir", sessionDir];
 	if (model) piArgs.push("--model", model);
 
 	const slackConfig = {
@@ -301,6 +303,12 @@ function main(): void {
 			);
 			return;
 		default:
+			// Guard against a typo'd flag silently starting the daemon.
+			if (arg && arg.startsWith("-")) {
+				console.error(`Unknown option: ${arg}`);
+				console.error("Usage: toolkit-daemon [--print-units | --write-units [dir]]");
+				process.exit(1);
+			}
 			runDaemon();
 	}
 }

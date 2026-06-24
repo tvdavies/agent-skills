@@ -2,7 +2,7 @@
  * Slack event → trigger mapping (pure).
  *
  * Shared by the Socket Mode bridge and the /slack/events webhook. Applies the
- * allowlist (the security boundary, since the agent runs --yolo), ignores the
+ * allowlist (the security boundary, since the agent runs without approval prompts), ignores the
  * bot's own and non-substantive messages, and produces a trigger carrying the
  * Slack origin so a reply can be routed back to the thread.
  */

@@ -4,7 +4,7 @@
  *
  * This is the safety floor that makes "high autonomy, notify-after" acceptable:
  * the agent acts end-to-end within guardrails, but genuinely destructive or
- * irreversible-and-dangerous operations are blocked even under `--yolo`.
+ * irreversible-and-dangerous operations are blocked even though pi has no approval prompts.
  *
  * No Pi/fs imports — fully table-driven and unit-tested in policy.test.ts. The
  * extension (../index) maps a Decision onto an actual block/prompt/allow.
