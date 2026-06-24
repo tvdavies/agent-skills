@@ -20,6 +20,6 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["extensions", "bin", "scripts"],
+  "include": ["extensions", "bin", "daemon", "scripts"],
   "exclude": ["node_modules", "archive"]
 }

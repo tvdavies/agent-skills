@@ -8,6 +8,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import { recordDecision } from "./lib/decisions";
 
 const GOAL_SET_TYPE = "goal-set";
 const GOAL_STATUS_TYPE = "goal-status";
@@ -462,6 +463,17 @@ Goal metadata:
 				};
 			}
 			const updated = setStatus(params.status, params.summary);
+			if (updated) {
+				// Record completion/blockage to the decision spine. When blocked in a
+				// headless run this is the escalation notice (the pull channel today;
+				// Phase 3 also pushes it to Slack).
+				recordDecision({
+					kind: params.status === "blocked" ? "escalate" : "goal-complete",
+					summary: `Goal ${params.status}: ${updated.objective}${params.summary ? ` — ${params.summary.trim()}` : ""}`,
+					source: "goal",
+					detail: { goalId: updated.id },
+				});
+			}
 			return {
 				content: [{ type: "text", text: updated ? goalSummary(updated) : "No goal is set." }],
 				details: { ok: true, goal: updated ?? null },
