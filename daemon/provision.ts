@@ -29,6 +29,8 @@ export type ProvisionConfig = {
 	user?: string;
 	/** Bin dir to prepend to PATH so the service finds node/pi (e.g. an nvm dir). */
 	nodeBinDir?: string;
+	/** User bin dir to prepend to PATH so the service finds CLIs like `tadu`. */
+	userBinDir?: string;
 	/** Absolute path to the pi binary, for AGENT_TOOLKIT_PI_BIN under systemd. */
 	piBin?: string;
 };
@@ -41,8 +43,9 @@ export function renderEnvFile(cfg: ProvisionConfig): string {
 		`# ${cfg.instance} environment — sourced by the launcher.`,
 		`# Mode 0600, owned by the service user. Put real secrets below the marker.`,
 	];
-	// Make node/pi resolvable under systemd (PATH is minimal there).
-	if (cfg.nodeBinDir) lines.push(`export PATH=${cfg.nodeBinDir}:$PATH`);
+	// Make node/pi and user CLIs (tadu) resolvable under systemd (PATH is minimal there).
+	const pathDirs = [cfg.nodeBinDir, cfg.userBinDir].filter(Boolean);
+	if (pathDirs.length) lines.push(`export PATH=${pathDirs.join(":")}:$PATH`);
 	if (cfg.piBin) lines.push(`export AGENT_TOOLKIT_PI_BIN=${cfg.piBin}`);
 	lines.push(
 		`export AGENT_TOOLKIT_STATE_DIR=${cfg.stateDir}`,

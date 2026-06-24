@@ -25,6 +25,7 @@ import { notify } from "../extensions/lib/notify.ts";
 import { brainRoot } from "../extensions/lib/paths.ts";
 import { INITIAL_RUNS_STATE, recordRun, type RunsState } from "../extensions/lib/runs.ts";
 import { applyCumulativeCost, INITIAL_SPEND_STATE, type SpendState } from "../extensions/lib/spend.ts";
+import { ensureWorkspace, taduRoot } from "../extensions/lib/tadu.ts";
 import { Dashboard } from "../daemon/dashboard.ts";
 import { checkEnvFileSecurity } from "../daemon/env-secure.ts";
 import { FileInbox } from "../daemon/inbox.ts";
@@ -77,6 +78,8 @@ function provisionConfig(): ProvisionConfig {
 		// Bake node/pi paths into the env file so the service works under systemd
 		// (where PATH is minimal). Assumes node + pi share a bin dir (nvm/volta/asdf).
 		nodeBinDir: dirname(process.execPath),
+		// User CLIs (tadu) conventionally live here; needed for the TADU spine.
+		userBinDir: join(homedir(), ".local", "bin"),
 		piBin: process.env.AGENT_TOOLKIT_PI_BIN ?? join(dirname(process.execPath), "pi"),
 	};
 }
@@ -135,6 +138,11 @@ function enforceEnvSecurity(): void {
 
 function runDaemon(): void {
 	enforceEnvSecurity();
+	// Ensure the central TADU work store exists so triggers can attach tasks and
+	// the board renders from turn one (best-effort; needs the `tadu` binary).
+	if (!ensureWorkspace()) {
+		console.error(`[toolkit-daemon] TADU workspace unavailable at ${taduRoot()} (is the 'tadu' binary on PATH?); board will be empty`);
+	}
 	const inbox = new FileInbox(join(state, "inbox.jsonl"));
 	const statusPath = join(state, "daemon-status.json");
 	// pi 0.75.5 has no tool-permission prompts; tools run headlessly and the
@@ -293,6 +301,7 @@ function runDaemon(): void {
 	const dashboard = new Dashboard({
 		enqueue: (text) => inbox.append({ text, source: "dashboard" }),
 		statusPath,
+		sessionsDir: sessionDir,
 		cronJobs: () =>
 			new CronJobStore().list().map((j) => ({ id: j.id, schedule: j.schedule, description: j.description })),
 		token: process.env.AGENT_TOOLKIT_DASHBOARD_TOKEN,

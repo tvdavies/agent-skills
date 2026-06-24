@@ -32,6 +32,11 @@ describe("renderEnvFile", () => {
 		expect(out).toContain("export AGENT_TOOLKIT_PI_BIN=/home/tom/.nvm/v24/bin/pi");
 		expect(out).toContain("# export SLACK_APP_TOKEN=");
 	});
+
+	it("adds the user bin dir to PATH so the service finds tadu", () => {
+		const out = renderEnvFile({ ...cfg, userBinDir: "/home/tom/.local/bin" });
+		expect(out).toContain("export PATH=/home/tom/.nvm/v24/bin:/home/tom/.local/bin:$PATH");
+	});
 });
 
 describe("renderLauncher", () => {

@@ -24,6 +24,7 @@ import {
 	shouldRunHeartbeat,
 } from "../extensions/heartbeat/schedule-gate.ts";
 import { stateDir } from "../extensions/lib/decisions.ts";
+import { taduRoot, workspaceExists } from "../extensions/lib/tadu.ts";
 
 type Args = {
 	source?: string;
@@ -48,22 +49,13 @@ function parseArgs(argv: string[]): Args {
 	return out;
 }
 
-function findTaduWorkspace(start: string): boolean {
-	let dir = start;
-	for (let i = 0; i < 30; i += 1) {
-		if (existsSync(join(dir, ".tadu"))) return true;
-		const parent = join(dir, "..");
-		if (parent === dir) break;
-		dir = parent;
-	}
-	return false;
-}
-
-/** Best-effort: create a TADU task for visibility; return its id if created. */
-function createTaduTask(text: string): string | undefined {
+/** Best-effort: create a TADU task in the central workspace for visibility. */
+function createTaduTask(text: string, source?: string): string | undefined {
 	try {
 		const title = text.length > 80 ? `${text.slice(0, 79)}…` : text;
-		const result = spawnSync("tadu", ["new", "--title", title, "--label", "trigger"], {
+		const labels = ["trigger", ...(source ? [`src:${source}`] : [])].flatMap((l) => ["--label", l]);
+		const result = spawnSync("tadu", ["new", "--title", title, ...labels], {
+			cwd: taduRoot(),
 			encoding: "utf8",
 			timeout: 5000,
 		});
@@ -155,7 +147,7 @@ function main(): void {
 	}
 
 	const taduTask =
-		!args.noTadu && findTaduWorkspace(process.cwd()) ? createTaduTask(args.text) : undefined;
+		!args.noTadu && workspaceExists() ? createTaduTask(args.text, args.source) : undefined;
 
 	const inbox = new FileInbox(join(stateDir(), "inbox.jsonl"));
 	const trigger = inbox.append({
