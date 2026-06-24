@@ -61,6 +61,14 @@ chmod 0755 "$CONFIG/launch.sh"
 mkdir -p "$UNITDIR"
 cp "$CONFIG/$INSTANCE.service" "$UNITDIR/$INSTANCE.service"
 
+# write-units preserves an existing env file (to protect secrets), so ensure the
+# node/pi paths are present even on a pre-existing serve.env — without them the
+# service cannot find pi under systemd's minimal PATH.
+if ! grep -q "AGENT_TOOLKIT_PI_BIN" "$CONFIG/serve.env" 2>/dev/null; then
+  printf 'export PATH=%s:$PATH\nexport AGENT_TOOLKIT_PI_BIN=%s\n' "$(dirname "$NODE_BIN")" "$(command -v pi)" >> "$CONFIG/serve.env"
+  chmod 600 "$CONFIG/serve.env"
+fi
+
 # 3. Heartbeat schedule via a systemd user timer (no crontab needed).
 if [ "$WITH_SCHEDULE" = true ]; then
   # The timer interval (OnCalendar) drives the heartbeat frequency; keep it in
@@ -97,6 +105,7 @@ fi
 # 5. Enable + start.
 echo "==> [5/5] enable + start"
 systemctl --user daemon-reload
+systemctl --user reset-failed "$INSTANCE.service" 2>/dev/null || true
 systemctl --user enable --now "$INSTANCE.service"
 [ "$WITH_SCHEDULE" = true ] && systemctl --user enable --now "$INSTANCE-heartbeat.timer"
 

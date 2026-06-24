@@ -63,6 +63,14 @@ describe("RpcClient e2e (fake-pi)", () => {
 		expect(resp?.data?.cost).toBe(2.5);
 	});
 
+	it("emits exit (not a fatal error) when the binary is missing", async () => {
+		client = new RpcClient({ command: "definitely-not-a-real-binary-xyz", args: [] });
+		client.start();
+		const [code] = (await once(client, "exit")) as [number | null];
+		expect(code).toBe(-1);
+		expect(client.running).toBe(false);
+	});
+
 	it("stops the child cleanly", async () => {
 		startClient();
 		client.submit("hello");

@@ -82,6 +82,12 @@ bun test extensions/        # run the suite
 bun run typecheck           # tsc --noEmit (new code is type-clean)
 ```
 
+Note: the integration tests import the Pi-facing modules, which need the dev deps
+(Pi types + TypeBox). A production install (`scripts/install.sh` / `bootstrap.sh`)
+runs `npm ci --omit=dev` and strips those — pi provides them to extensions at
+runtime, but to run the tests afterwards do `bun install` (or `npm install`) to
+restore them.
+
 Conventions for new extensions:
 
 - Pure cores (parsing, ranking, classification, formatting) carry no Pi imports

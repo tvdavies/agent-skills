@@ -270,7 +270,7 @@ function runDaemon(): void {
 					logger: (m) => console.error(m),
 				})
 			: undefined;
-	if (webhook) void webhook.start();
+	if (webhook) webhook.start().catch((e) => console.error(`[webhook] failed to start: ${e}`));
 	if (slack) void slack.connect().catch((e) => console.error(`[slack] connect failed: ${e}`));
 
 	// Notify-watcher: deliver the push channel to Slack (when a channel is set).
@@ -297,7 +297,7 @@ function runDaemon(): void {
 		port: Number(process.env.AGENT_TOOLKIT_DASHBOARD_PORT ?? 8788),
 		logger: (m) => console.error(m),
 	});
-	void dashboard.start();
+	dashboard.start().catch((e) => console.error(`[dashboard] failed to start: ${e}`));
 
 	console.error(
 		`[toolkit-daemon] started (instance=${instance}, slack=${slack ? "on" : "off"}, webhook=${webhook ? "on" : "off"}, dashboard=on, spendCap=${dailyCapUsd > 0 ? `$${dailyCapUsd}` : "off"}, runsCap=${maxRunsPerDay > 0 ? maxRunsPerDay : "off"})`,

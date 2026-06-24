@@ -74,13 +74,23 @@ export class RpcClient extends EventEmitter {
 		child.stderr?.on("data", (chunk: Buffer) => {
 			this.options.logger?.(`[pi stderr] ${chunk.toString().trimEnd()}`);
 		});
-		child.on("error", (err) => this.emit("error", err));
-		child.on("exit", (code, signal) => {
+		// Treat a spawn error (e.g. ENOENT: pi not on PATH) as a termination so the
+		// supervisor respawns with backoff — never an unhandled 'error' that would
+		// crash the whole daemon (and take the dashboard down with it).
+		let terminated = false;
+		const terminate = (code: number | null, signal: NodeJS.Signals | null) => {
+			if (terminated) return;
+			terminated = true;
 			for (const line of this.framer.flush()) this.handleLine(line);
 			this.child = undefined;
 			this.streaming = false;
 			this.emit("exit", code, signal);
+		};
+		child.on("error", (err) => {
+			this.options.logger?.(`[pi spawn error] ${err.message}`);
+			terminate(-1, null);
 		});
+		child.on("exit", (code, signal) => terminate(code, signal));
 	}
 
 	/** Whether the child is alive. */
