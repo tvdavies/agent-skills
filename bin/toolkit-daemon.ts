@@ -45,12 +45,14 @@ function csv(value: string | undefined): string[] {
 	return (value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-/** Heuristic: is the resident model an Anthropic/Claude one (subscription back-off)? */
-function isAnthropicModel(model: { id?: string; provider?: string } | null | undefined): boolean {
+/** Heuristic: is the resident model on subscription/managed auth (Claude Code OAuth
+ *  or Codex)? Such auth bills ~$0 per token but has rate-limit windows, so the
+ *  heartbeat backs off. A plain API-key provider ("openai"/"anthropic-api") is not. */
+function isSubscriptionModel(model: { id?: string; provider?: string } | null | undefined): boolean {
 	if (!model) return false;
 	const provider = (model.provider ?? "").toLowerCase();
 	const id = (model.id ?? "").toLowerCase();
-	return provider.includes("anthropic") || id.includes("claude");
+	return provider.includes("anthropic") || provider.includes("codex") || id.includes("claude");
 }
 
 const repoDir = join(import.meta.dirname, "..");
@@ -248,7 +250,7 @@ function runDaemon(): void {
 			| undefined;
 		const model = resp?.data?.model ?? null;
 		writeJson(join(state, "agent-state.json"), {
-			authMode: isAnthropicModel(model) ? "anthropic" : "other",
+			authMode: isSubscriptionModel(model) ? "subscription" : "other",
 			model: model ? { id: model.id, provider: model.provider } : null,
 			ts: new Date().toISOString(),
 		});

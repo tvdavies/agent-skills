@@ -20,6 +20,7 @@ import {
 	type GateVerdict,
 	type HeartbeatGateState,
 	parseHoursWindow,
+	resolveMinIntervalMinutes,
 	shouldRunHeartbeat,
 } from "../extensions/heartbeat/schedule-gate.ts";
 import { stateDir } from "../extensions/lib/decisions.ts";
@@ -83,16 +84,10 @@ function readJson(path: string): unknown {
 	}
 }
 
-/**
- * Minimum minutes between heartbeats. Explicit env wins; otherwise default to
- * hourly when the daemon detected an Anthropic/Claude model (mirrors OpenClaw's
- * subscription back-off), else 30 minutes.
- */
+/** Minimum minutes between heartbeats (env override, else auth-aware default). */
 function heartbeatMinIntervalMin(): number {
-	const env = Number(process.env.AGENT_TOOLKIT_HEARTBEAT_MIN_MINUTES);
-	if (Number.isFinite(env) && env >= 0) return Math.floor(env); // 0 disables gating
 	const authMode = (readJson(join(stateDir(), "agent-state.json")) as { authMode?: string } | null)?.authMode;
-	return authMode === "anthropic" ? 60 : 30;
+	return resolveMinIntervalMinutes(process.env.AGENT_TOOLKIT_HEARTBEAT_MIN_MINUTES, authMode);
 }
 
 /** Gate a heartbeat: enforce the min interval + optional active-hours window. */

@@ -88,6 +88,10 @@ Core: `AGENT_TOOLKIT_INSTANCE`, `AGENT_TOOLKIT_STATE_DIR`,
 `AGENT_TOOLKIT_SESSION_DIR`, `AGENT_TOOLKIT_BRAIN_ROOT`, `AGENT_TOOLKIT_MODEL`,
 `AGENT_TOOLKIT_PI_BIN`.
 
+`AGENT_TOOLKIT_MODEL` selects the resident model — it is passed to pi as
+`--model <provider/id>` (e.g. `anthropic/claude-opus-4-8` or `openai-codex/gpt-5.5`).
+Unset = pi's configured default. Run `pi --list-models` to see what's available.
+
 Ingestion (Phase 3): `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_ALLOWED_USERS`,
 `SLACK_BOT_USER_ID`, `SLACK_SIGNING_SECRET`, `WEBHOOK_SECRET`, `WEBHOOK_PORT`.
 Slack/webhook listeners start only when their tokens/secrets are present. Secrets
@@ -99,7 +103,7 @@ Oversight (Phase 4): `AGENT_TOOLKIT_DASHBOARD_PORT` (default 8788),
 (where the notify push channel is delivered).
 
 Cadence & guards: `AGENT_TOOLKIT_HEARTBEAT_MIN_MINUTES` (effective heartbeat
-cadence regardless of the timer; auto-defaults to 60 on Claude subscription auth,
+cadence regardless of the timer; auto-defaults to 60 on Claude/Codex subscription auth,
 else 30; `0` disables), `AGENT_TOOLKIT_HEARTBEAT_HOURS` (`HH:MM-HH:MM` active
 window, e.g. `07:00-23:00`), `AGENT_TOOLKIT_MAX_RUNS_PER_DAY` (subscription-safe
 runs/day cap — the relevant guard when cost is billed to a subscription),

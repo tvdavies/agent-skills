@@ -1,5 +1,18 @@
 import { describe, expect, it } from "bun:test";
-import { parseHoursWindow, shouldRunHeartbeat } from "./schedule-gate";
+import { parseHoursWindow, resolveMinIntervalMinutes, shouldRunHeartbeat } from "./schedule-gate";
+
+describe("resolveMinIntervalMinutes", () => {
+	it("honours an explicit env value (0 disables)", () => {
+		expect(resolveMinIntervalMinutes("45", "subscription")).toBe(45);
+		expect(resolveMinIntervalMinutes("0", "subscription")).toBe(0);
+	});
+	it("defaults to hourly on subscription/managed auth, else 30", () => {
+		expect(resolveMinIntervalMinutes(undefined, "subscription")).toBe(60);
+		expect(resolveMinIntervalMinutes(undefined, "anthropic")).toBe(60); // legacy value
+		expect(resolveMinIntervalMinutes(undefined, "other")).toBe(30);
+		expect(resolveMinIntervalMinutes(undefined, undefined)).toBe(30);
+	});
+});
 
 // Local-time constructor + local getters → tz-independent assertions.
 const at = (h: number, m = 0) => new Date(2026, 5, 24, h, m, 0);

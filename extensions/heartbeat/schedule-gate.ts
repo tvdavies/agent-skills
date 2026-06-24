@@ -23,6 +23,21 @@ export type HeartbeatGateState = { lastRunMs: number };
 
 export type GateVerdict = { run: boolean; reason?: string };
 
+/**
+ * Resolve the effective minimum minutes between heartbeats. An explicit env value
+ * wins (0 disables gating); otherwise default to hourly on subscription/managed
+ * auth (Claude Code OAuth, Codex — where a too-frequent heartbeat burns the
+ * rate-limit window), else 30 minutes. Mirrors OpenClaw's OAuth back-off.
+ */
+export function resolveMinIntervalMinutes(
+	envValue: string | undefined,
+	authMode: string | undefined,
+): number {
+	const explicit = Number(envValue);
+	if (Number.isFinite(explicit) && explicit >= 0) return Math.floor(explicit);
+	return authMode === "subscription" || authMode === "anthropic" ? 60 : 30;
+}
+
 /** Parse "07:00-23:00" into minutes-of-day. Returns undefined if malformed. */
 export function parseHoursWindow(spec: string | undefined): HoursWindow | undefined {
 	if (!spec) return undefined;

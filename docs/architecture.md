@@ -81,7 +81,7 @@ recoverable actions) and reports. The floor:
   (subscription auth, where cost reads ~$0); either pauses forwarding once hit,
   resets daily, and escalates once. The daemon detects the model via `get_state`.
 - **Heartbeat cadence + silence** — the effective cadence is `max(timer, min)`
-  (auto-hourly on Claude subscription auth) within optional quiet hours, gated in
+  (auto-hourly on Claude/Codex subscription auth) within optional quiet hours, gated in
   `toolkit-trigger`; check-ins escalate only what needs attention, suppressing
   already-handled items.
 - **Completion audit** — `goal.ts` requires evidence before "complete"; a
