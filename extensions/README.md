@@ -15,6 +15,8 @@ Custom Pi extensions bundled by the root `agent-toolkit` Pi package.
 - `brain/` — durable memory as an Open Knowledge Format (OKF) markdown bundle queried by ripgrep and committed to git. Registers `brain_query`/`brain_remember`/`brain_forget` tools, injects recalled context on each turn, and adds `/brain`.
 - `guardrails/` — the safety floor for autonomous operation: blocks destructive/banned tool calls (even under `--yolo`) via the `tool_call` hook, with autonomy levels (`high`/`balanced`/`conservative`) and `/guard`.
 - `observe/` — the in-terminal oversight surface: `/status` renders a single pane (daemon, goal, schedule, workflows, brain, TADU, recent decisions) over the decision spine.
+- `cron/` — durable scheduling via the user's crontab: `/cron` manages a job set (default: the heartbeat) and renders a managed block that runs `toolkit-trigger --cron-job <id>`. Install is deferred (`/cron print` renders the crontab to apply).
+- `heartbeat/` — the scheduled check-in loop: detects the heartbeat trigger and injects `HEARTBEAT.md` + the silence rule, suppresses already-handled items, and escalates only what needs attention via `heartbeat_note`. Adds `/heartbeat`.
 - `lib/` — shared modules used by several extensions (the `decisions` audit spine and `paths`). It has no `index.ts`, so Pi never loads it as an extension.
 - `openai-fast.json` — provider/model configuration retained with the extension set.
 
@@ -54,6 +56,19 @@ Workflow authoring guidelines:
 - Use `isolation: "worktree"` for modifying agents; inspect diffs with `/workflow-show` and apply clean patches with `/workflow-apply`.
 
 Bundled example workflow patterns currently include `auth-audit`, `codebase-audit`, `deep-research`, `migration-plan`, and `validate-branch`.
+
+## Scheduling: scheduler vs cron
+
+- `scheduler.ts` (`/schedule`) is for **in-session, ephemeral** timers — "check
+  this PR in 10m". Jobs live in the session and are lost on a full restart.
+- `cron/` (`/cron`) is for **durable, periodic** jobs that survive reboot. Each
+  managed crontab line runs `toolkit-trigger --cron-job <id>`, dropping a trigger
+  the daemon forwards to the resident agent. The prompt text lives in the jobs
+  store, so cron lines stay quoting-free. Installation is deferred — `/cron print`
+  renders the crontab for you to apply with `crontab <file>`.
+- The default cron job is the **heartbeat** (every 30 min). When it runs,
+  `heartbeat/` injects `HEARTBEAT.md` + the silence rule, lists already-handled
+  items so nothing is re-flagged, and escalates only what needs attention.
 
 ## Development and tests
 

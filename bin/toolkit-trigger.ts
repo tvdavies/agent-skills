@@ -15,9 +15,16 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { FileInbox } from "../daemon/inbox.ts";
+import { CronJobStore } from "../extensions/cron/jobs.ts";
 import { stateDir } from "../extensions/lib/decisions.ts";
 
-type Args = { source?: string; dedupeKey?: string; noTadu: boolean; text: string };
+type Args = {
+	source?: string;
+	dedupeKey?: string;
+	noTadu: boolean;
+	cronJob?: string;
+	text: string;
+};
 
 function parseArgs(argv: string[]): Args {
 	const out: Args = { noTadu: false, text: "" };
@@ -26,6 +33,7 @@ function parseArgs(argv: string[]): Args {
 		const arg = argv[i];
 		if (arg === "--source") out.source = argv[++i];
 		else if (arg === "--dedupe") out.dedupeKey = argv[++i];
+		else if (arg === "--cron-job") out.cronJob = argv[++i];
 		else if (arg === "--no-tadu") out.noTadu = true;
 		else if (arg) rest.push(arg);
 	}
@@ -60,10 +68,33 @@ function createTaduTask(text: string): string | undefined {
 	}
 }
 
+/** Resolve a cron job's prompt from the store and queue it (no TADU task). */
+function runCronJob(id: string): void {
+	const store = new CronJobStore();
+	let job = store.get(id);
+	if (!job) {
+		store.seedDefaults();
+		job = store.get(id);
+	}
+	if (!job) {
+		console.error(`unknown cron job: ${id}`);
+		process.exit(1);
+	}
+	const inbox = new FileInbox(join(stateDir(), "inbox.jsonl"));
+	const trigger = inbox.append({ text: job.text, source: job.source ?? `cron:${id}` });
+	console.log(`queued cron job ${id} as trigger ${trigger.id}`);
+}
+
 function main(): void {
 	const args = parseArgs(process.argv.slice(2));
+	if (args.cronJob) {
+		runCronJob(args.cronJob);
+		return;
+	}
 	if (args.text === "") {
-		console.error("Usage: toolkit-trigger [--source <s>] [--dedupe <key>] [--no-tadu] <text...>");
+		console.error(
+			"Usage: toolkit-trigger [--source <s>] [--dedupe <key>] [--no-tadu] <text...>\n       toolkit-trigger --cron-job <id>",
+		);
 		process.exit(1);
 	}
 
