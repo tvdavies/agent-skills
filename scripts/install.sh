@@ -63,7 +63,9 @@ cp "$CONFIG/$INSTANCE.service" "$UNITDIR/$INSTANCE.service"
 
 # 3. Heartbeat schedule via a systemd user timer (no crontab needed).
 if [ "$WITH_SCHEDULE" = true ]; then
-  echo "==> [3/5] heartbeat timer (every 30 min)"
+  # The timer interval (OnCalendar) drives the heartbeat frequency; keep it in
+  # step with the heartbeat job's schedule in extensions/cron/jobs.ts.
+  echo "==> [3/5] heartbeat timer (every 5 min)"
   cat > "$UNITDIR/$INSTANCE-heartbeat.service" <<EOF
 [Unit]
 Description=Agent Toolkit heartbeat trigger
@@ -73,9 +75,9 @@ ExecStart=/usr/bin/env bash -lc 'source $CONFIG/serve.env 2>/dev/null; exec $NOD
 EOF
   cat > "$UNITDIR/$INSTANCE-heartbeat.timer" <<EOF
 [Unit]
-Description=Agent Toolkit heartbeat every 30 min
+Description=Agent Toolkit heartbeat every 5 min
 [Timer]
-OnCalendar=*:0/30
+OnCalendar=*:0/5
 Persistent=true
 [Install]
 WantedBy=timers.target
