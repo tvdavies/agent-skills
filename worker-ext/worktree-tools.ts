@@ -8,10 +8,14 @@
  * worker — which runs with --no-extensions plus explicit -e loads — can manage
  * its own worktrees (adopt a PR branch, work across repos) without the session
  * machinery. The resident loads the full extension; workers load this one.
+ *
+ * Lives OUTSIDE extensions/ (which pi auto-discovers) so it is never loaded into
+ * an interactive session alongside worktrees.ts — that would register the
+ * worktree_* tools twice. Workers load it explicitly via -e.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerWorktreeTools } from "./worktrees.ts";
+import { registerWorktreeTools } from "../extensions/worktrees.ts";
 
 export default function worktreeToolsExtension(pi: ExtensionAPI): void {
 	registerWorktreeTools(pi);

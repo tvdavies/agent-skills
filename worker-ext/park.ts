@@ -14,8 +14,8 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import { stateDir } from "./lib/decisions.ts";
-import { clampParkSeconds, writeParkRequest } from "./lib/park.ts";
+import { stateDir } from "../extensions/lib/decisions.ts";
+import { clampParkSeconds, writeParkRequest } from "../extensions/lib/park.ts";
 
 const parkSchema = Type.Object({
 	prompt: Type.String({

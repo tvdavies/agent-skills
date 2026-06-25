@@ -238,8 +238,8 @@ function runDaemon(): void {
 		// park tool (wait for CI/review and resume this same session later).
 		guardrailsPath,
 		toolExtensions: [
-			join(repoDir, "extensions", "worktree-tools.ts"),
-			join(repoDir, "extensions", "park.ts"),
+			join(repoDir, "worker-ext", "worktree-tools.ts"),
+			join(repoDir, "worker-ext", "park.ts"),
 		],
 		// Each worker gets its own git worktree (branch worker/<id>) so concurrent
 		// workers never collide or dirty the shared checkout.
