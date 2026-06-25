@@ -1,12 +1,13 @@
 export const meta = {
   name: "implement-ticket",
   description:
-    "Implement a ticket end-to-end from a Linear/tadu id or a free-form change description. Fetches the ticket and extracts acceptance criteria, maps the affected code and conventions, generates and judges several implementation approaches, carries out the winning plan in an isolated git worktree (code + tests, runs the test suite), then runs an adversarial review (correctness, test-adequacy, regression-risk) with a bounded fix pass. Leaves the change in a worktree for the user to review and merge; never pushes or opens a PR unless args explicitly asks.",
+    "Implement a ticket or bug end-to-end and open a well-described PR. Triages the input like a principal engineer (ticket id or free-form report; detects an existing branch/PR to continue, duplicate/related issues, or a ticket too big for one PR), maps the code, plans via a judge panel, implements in an isolated worktree with tests and an adversarial review + bounded fix, then pushes a well-named branch and opens a well-described PR against the base. Surfaces related issues and any recommended breakdown into follow-up PRs. Pass { noPr: true } (or say 'leave it in the worktree') to stop before pushing; { draft: true } for a draft PR.",
   phases: [
-    { title: "Understand", detail: "Fetch the ticket, extract acceptance criteria, and map the affected code, tests, and conventions in parallel." },
+    { title: "Understand", detail: "Triage the input (ticket vs report; existing branch/PR; duplicates; size) and, in parallel, fetch the requirement and map the affected code and conventions." },
     { title: "Plan", detail: "Generate independent implementation approaches, score them with parallel judges, and synthesize the winning plan grafting the best ideas from runners-up." },
     { title: "Implement", detail: "Carry out the winning plan in a fresh git worktree, writing code and tests and running the repo's test command, scoped to the ticket." },
     { title: "Review", detail: "Independent reviewers across correctness, test-adequacy, and regression-risk try to find real problems and re-run tests; do one bounded fix pass if needed." },
+    { title: "Ship", detail: "Commit on a well-named branch, push, and open a well-described PR against the base branch (unless opted out)." },
   ],
 };
 
@@ -32,14 +33,13 @@ if (!request) {
   };
 }
 
-// Detect an explicit instruction to push / open a PR. Default is to leave the
-// change in a worktree only. Require a verb-ish context so an incidental mention
-// of the word "push" (e.g. "add a push button") does not flip this on.
-const wantsPush =
-  /\b(open|create|raise|submit|file)\s+(a\s+|an\s+)?(pr|pull request)\b/i.test(request) ||
-  /\bpull request\b/i.test(request) ||
-  /\b(push|pushing)\s+(the\s+|this\s+|my\s+)?(branch|change|changes|commit|commits|code|work|it|up|to\b)/i.test(request) ||
-  /\bgit push\b/i.test(request);
+// Default: implement AND open a well-described PR (changes go on PRs). Opt out
+// to stop at the worktree (args.noPr, or a clear instruction in the text).
+const argObj = args && typeof args === "object" ? args : {};
+const optedOutOfPr =
+  argObj.noPr === true ||
+  /\b(leave (it )?in (a |the )?worktree|don'?t (open|create|raise|push) (a )?(pr|pull request|branch)?|no pr|without (a )?pr)\b/i.test(request);
+const draftPr = argObj.draft === true || /\bdraft (pr|pull request)\b/i.test(request);
 
 // ===========================================================================
 // PHASE 1 — UNDERSTAND (parallel barrier: both halves must land before planning)
@@ -86,7 +86,24 @@ const codeMapSchema = {
   },
 };
 
-const [ticket, codeMap] = await parallel([
+const triageSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["inputType", "baseBranch", "existingBranch", "existingPr", "relatedIssues", "tooBigForOnePr", "suggestedSubtasks", "branchName", "rationale"],
+  properties: {
+    inputType: { type: "string", enum: ["linear-ticket", "tadu-ticket", "bug-report", "change-request"] },
+    baseBranch: { type: "string", description: "the branch this PR should target (the repo default unless the ticket says otherwise)" },
+    existingBranch: { type: "string", description: "an existing local/remote branch already holding work for this ticket, or empty if none" },
+    existingPr: { type: "string", description: "URL of an existing open PR for this work, or empty" },
+    relatedIssues: { type: "array", items: { type: "string" }, description: "duplicate or closely-related tickets/PRs (id + one line) so we don't duplicate work" },
+    tooBigForOnePr: { type: "boolean", description: "true if this should be split into multiple PRs" },
+    suggestedSubtasks: { type: "array", items: { type: "string" }, description: "if tooBigForOnePr, the recommended slices each shippable as its own PR, smallest/foundational first" },
+    branchName: { type: "string", description: "a well-formed branch name for fresh work, following any visible repo convention" },
+    rationale: { type: "string" },
+  },
+};
+
+const [ticket, codeMap, triage] = await parallel([
   () =>
     agent(
       `You are gathering the requirement for a code-implementation task.\n\n` +
@@ -112,6 +129,19 @@ const [ticket, codeMap] = await parallel([
         `Every path and command you report must be verified against the real repo.`,
       { label: "map-code", phase: "Understand", schema: codeMapSchema, effort: "medium" },
     ),
+  () =>
+    agent(
+      `You are TRIAGING a code task before any work starts — size up the situation like a principal engineer. Read-only; do NOT edit or implement.\n\n` +
+        `Input:\n"""\n${request}\n"""\n\n` +
+        `Establish, grounding each finding in actual command output:\n` +
+        `1. inputType: a Linear ticket id (LLE-…), a tadu id, a bug report, or a general change request?\n` +
+        `2. baseBranch: the branch this PR should target — the repo default ('git symbolic-ref refs/remotes/origin/HEAD --short', else 'git remote show origin'), unless the ticket specifies otherwise.\n` +
+        `3. existingBranch / existingPr: does work already exist? Search local+remote branches ('git branch -a') and open PRs ('gh pr list --search <ticket id or keywords>') for this ticket. If a branch or PR already holds related work, report it — we will CONTINUE it, not duplicate.\n` +
+        `4. relatedIssues: duplicate or closely-related tickets/PRs (search Linear via linear-cli and 'gh pr list'/'gh issue list'). List id + one line each so we don't duplicate effort.\n` +
+        `5. tooBigForOnePr + suggestedSubtasks: is this too large for one reviewable PR? If so, propose slices each shippable as its own PR, smallest/foundational first.\n` +
+        `6. branchName: a well-formed branch name for fresh work, following any visible repo convention (else '<ticket-id-lowercased>-<short-slug>').`,
+      { label: "triage", phase: "Understand", schema: triageSchema, effort: "medium", agentType: "scout" },
+    ),
 ]);
 
 if (!ticket || !codeMap) {
@@ -130,7 +160,21 @@ if (!ticket || !codeMap) {
 }
 
 const testCommand = (codeMap.testCommand && String(codeMap.testCommand).trim()) || "bun test";
-log(`Resolved test command: ${testCommand}. Acceptance criteria: ${(ticket.acceptanceCriteria || []).length}.`);
+const triageInfo = triage || {
+  inputType: "change-request",
+  baseBranch: "",
+  existingBranch: "",
+  existingPr: "",
+  relatedIssues: [],
+  tooBigForOnePr: false,
+  suggestedSubtasks: [],
+  branchName: "",
+  rationale: "(triage unavailable)",
+};
+log(
+  `Resolved test command: ${testCommand}. Acceptance criteria: ${(ticket.acceptanceCriteria || []).length}. ` +
+    `Triage: ${triageInfo.inputType}${triageInfo.existingBranch ? `, existing branch ${triageInfo.existingBranch}` : ""}${triageInfo.tooBigForOnePr ? ", large (breakdown recommended)" : ""}.`,
+);
 
 // Compact, shared context string handed to every later agent so they all reason
 // off the same grounded picture.
@@ -147,7 +191,16 @@ const sharedContext =
   `Conventions:\n${(codeMap.conventions || []).map((c) => `- ${c}`).join("\n") || "(none noted)"}\n` +
   `Existing tests:\n${(codeMap.existingTests || []).map((t) => `- ${t}`).join("\n") || "(none found)"}\n` +
   `Integration points:\n${(codeMap.integrationPoints || []).map((t) => `- ${t}`).join("\n") || "(none noted)"}\n` +
-  `Notes: ${codeMap.notes || "(none)"}`;
+  `Notes: ${codeMap.notes || "(none)"}\n\n` +
+  `SITUATION (triage):\n` +
+  `Input type: ${triageInfo.inputType}\n` +
+  `Base branch: ${triageInfo.baseBranch || "(repo default)"}\n` +
+  `Existing branch/PR: ${triageInfo.existingBranch || "(none)"}${triageInfo.existingPr ? ` / ${triageInfo.existingPr}` : ""}\n` +
+  `Related/duplicate issues: ${(triageInfo.relatedIssues || []).join("; ") || "(none found)"}\n` +
+  `Too big for one PR: ${triageInfo.tooBigForOnePr ? `yes — slices: ${(triageInfo.suggestedSubtasks || []).join("; ")}` : "no"}\n` +
+  (triageInfo.tooBigForOnePr
+    ? `>>> This run must implement only the FIRST/foundational slice as one reviewable PR; keep everything else OUT of scope and let the summary list the remaining slices as follow-up PRs.`
+    : "");
 
 // ---------------------------------------------------------------------------
 // Helpers for worktree agents. These agents MUST NOT use a JSON `schema`: the
@@ -356,7 +409,7 @@ const implementText = await agent(
     `- Follow the repo conventions captured in the code map. Mirror existing test style and location.\n` +
     `- Stay strictly within scope. Do NOT do anything in OUT OF SCOPE. No drive-by refactors.\n` +
     `- Run the test command: ${testCommand}. If failures are caused by your change, fix them and re-run until green (or until you are confident a remaining failure is pre-existing and unrelated — say so explicitly).\n` +
-    `- Do NOT commit, push, or open a PR.${wantsPush ? " (The user asked to push/PR; still do NOT push from here — the orchestrator handles that after review.)" : ""}\n\n` +
+    `- Do NOT commit, push, or open a PR — the Ship phase handles that after the change is reviewed.\n\n` +
     jsonContract(
       `filesChanged (string[]), testsAdded (string[]), testCommandRun (string, the exact command you ran), ` +
         `testsPassed (boolean), testOutputTail (string), summary (string: what you implemented and how it satisfies the acceptance criteria)`,
@@ -580,10 +633,75 @@ const reviewVerdict = postFixTestsPassed && survivingBlockers.length === 0
     ? "needs-attention"
     : "tests-failing";
 
-const fixedNote = fixResult
-  ? fixResult.worktreePath
-    ? ` Fixes were applied in a follow-up worktree at ${fixResult.worktreePath}; that worktree is the one to review/merge (it contains the implementation re-applied plus the fixes).`
-    : ` A fix pass ran but preserved no additional changes; review the implementation worktree at ${implementation.worktreePath}.`
+// ===========================================================================
+// PHASE 5 — SHIP (commit on a well-named branch, push, open a well-described PR)
+// ===========================================================================
+const baseBranch = (triageInfo.baseBranch && String(triageInfo.baseBranch).trim()) || "main";
+const toSlug = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+const branchName =
+  (triageInfo.existingBranch && String(triageInfo.existingBranch).trim()) ||
+  (triageInfo.branchName && String(triageInfo.branchName).trim()) ||
+  `${ticket.id ? `${toSlug(ticket.id)}-` : "ticket-"}${toSlug(finalPlan.title) || "change"}`;
+
+// Only ship if the change is sound: a worktree exists, tests pass, no surviving blockers.
+const shippable = Boolean(activeWorktreePath) && postFixTestsPassed && survivingBlockers.length === 0;
+let pr = null;
+
+if (optedOutOfPr) {
+  log("Opted out of a PR — leaving the change in the worktree.");
+} else if (!shippable) {
+  log(`Not shipping: ${!activeWorktreePath ? "no worktree" : survivingBlockers.length ? "surviving blockers" : "tests failing"} — left in the worktree.`);
+} else {
+  phase("Ship");
+  log(`Shipping branch ${branchName} -> PR against ${baseBranch}.`);
+  const acChecklist = (ticket.acceptanceCriteria || []).map((c) => `- [ ] ${c}`).join("\n") || "- [ ] (see description)";
+  const shipSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["pushed", "branch", "prUrl", "conflict", "notes"],
+    properties: {
+      pushed: { type: "boolean" },
+      branch: { type: "string" },
+      prUrl: { type: "string", description: "the PR URL (new, or the existing one updated), empty if none was opened" },
+      prNumber: { type: "string" },
+      conflict: { type: "boolean", description: "true if the change could not be applied cleanly onto an existing branch" },
+      notes: { type: "string" },
+    },
+  };
+  pr = await agent(
+    `Open the implemented + reviewed change as a PR. The change lives in the git worktree at ${activeWorktreePath}${activeDiffPath ? ` (preserved diff at ${activeDiffPath})` : ""}. Operate IN that worktree — do not create a new one.\n\n` +
+      `Base branch: ${baseBranch}. Branch to use: ${branchName}.\n` +
+      (triageInfo.existingBranch
+        ? `This CONTINUES existing work on ${triageInfo.existingBranch}${triageInfo.existingPr ? ` (PR ${triageInfo.existingPr})` : ""}: bring your changes onto that branch (fetch it, then cherry-pick/apply your commit onto it) and push it, updating its PR rather than opening a duplicate. If the changes do not apply cleanly, set conflict:true, push nothing, and explain in notes.\n`
+        : "") +
+      `Steps:\n` +
+      `1. In ${activeWorktreePath}: stage and commit ALL changes with a clear conventional message derived from the ticket (e.g. "<type>: <title>${ticket.id ? ` (${ticket.id})` : ""}"). Put the commit on branch ${branchName} (create it at the current commit if you are not already on it).\n` +
+      `2. Push: \`git push -u origin ${branchName}\`.\n` +
+      (triageInfo.existingPr
+        ? `3. A PR already exists (${triageInfo.existingPr}); do NOT open another — pushing updates it. Report that URL.\n`
+        : `3. Open a PR: \`gh pr create --base ${baseBranch} --head ${branchName}${draftPr ? " --draft" : ""} --title "<concise title>" --body-file <a temp .md file>\`. Write the body to a temp file first to avoid shell-escaping issues.\n`) +
+      `   The PR body MUST be well-described, with these sections:\n` +
+      `   ## Summary — what changed and why (1-3 sentences).\n` +
+      `   ## Changes — bullet list of the notable changes.\n` +
+      `   ## Testing — \`${testCommand}\` and that it passes.\n` +
+      `   ## Acceptance criteria\n${acChecklist}\n` +
+      (ticket.id ? `   Reference the ticket (${ticket.id}).\n` : "") +
+      (triageInfo.tooBigForOnePr ? `   Note that this is the first slice of a larger ticket; follow-up PRs: ${(triageInfo.suggestedSubtasks || []).join("; ")}.\n` : "") +
+      `4. Do NOT merge the PR. Report the PR URL, the branch, whether you pushed, and conflict:true if it could not be applied onto the existing branch.`,
+    { label: "ship-pr", phase: "Ship", schema: shipSchema, effort: "high", agentType: "worker" },
+  );
+  if (pr && pr.prUrl) log(`PR ready: ${pr.prUrl}`);
+  else log("Ship step returned no PR URL; the change remains in the worktree.");
+}
+
+const shipNote = optedOutOfPr
+  ? `Opted out of a PR — the change is in the worktree${activeWorktreePath ? ` at ${activeWorktreePath}` : ""} for you to review/merge.`
+  : pr && pr.prUrl
+    ? `PR: ${pr.prUrl}${pr.conflict ? " (changes could not be cleanly applied onto the existing branch — resolve the conflict)" : ""}`
+    : `No PR opened (${survivingBlockers.length ? "surviving blockers" : !postFixTestsPassed ? "tests failing" : "ship step incomplete"}); the change is in the worktree${activeWorktreePath ? ` at ${activeWorktreePath}` : ""}.`;
+const relatedNote = (triageInfo.relatedIssues || []).length ? `\nRelated/duplicate issues: ${triageInfo.relatedIssues.join("; ")}` : "";
+const breakdownNote = triageInfo.tooBigForOnePr
+  ? `\nLarge ticket — this run shipped the first slice; recommended follow-up PRs: ${(triageInfo.suggestedSubtasks || []).join("; ") || "(see triage)"}.`
   : "";
 
 const summary =
@@ -594,20 +712,17 @@ const summary =
   `Review: ${reviews.length} adversarial reviewer(s); ${realIssues.length} evidence-backed blocker/major issue(s)` +
   `${fixResult ? `, ${fixResult.fixedIssues.length} fixed in one bounded pass` : ""}. Verdict: ${reviewVerdict}.\n` +
   (survivingBlockers.length > 0 ? `Surviving blockers: ${survivingBlockers.map((b) => b.claim).join("; ")}\n` : "") +
-  `\nThe change is LEFT IN A GIT WORKTREE${activeWorktreePath ? ` at ${activeWorktreePath}` : ""} for you to review and merge.${fixedNote} ` +
-  `Nothing was committed, pushed, or opened as a PR.` +
-  (wantsPush
-    ? " (Your request mentioned pushing/PR: review the worktree first, then push/open the PR yourself, or re-invoke with an explicit push step — the workflow intentionally stops at the worktree.)"
-    : "");
+  shipNote + relatedNote + breakdownNote;
 
 return {
+  triage: triageInfo,
   plan: finalPlan,
   worktree: {
     path: activeWorktreePath,
     diffPath: activeDiffPath,
     implementWorktree: implementation.worktreePath,
     fixWorktree: fixResult ? fixResult.worktreePath : null,
-    branch: null,
+    branch: pr ? pr.branch : null,
   },
   testResult: {
     command: fixResult ? fixResult.testCommandRun : implementation.testCommandRun,
@@ -617,5 +732,6 @@ return {
   reviewVerdict,
   reviews,
   fixPass: fixResult,
+  pr: pr ? { url: pr.prUrl, branch: pr.branch, pushed: pr.pushed, conflict: pr.conflict } : null,
   summary,
 };
