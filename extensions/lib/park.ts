@@ -26,6 +26,8 @@ export type ParkedEntry = {
 	prompt: string;
 	reason?: string;
 	resumes: number;
+	/** Carried so a long-running loop (e.g. drive-pr) keeps its timeout on resume. */
+	timeoutMs?: number;
 };
 
 export const MIN_PARK_SECONDS = 30;

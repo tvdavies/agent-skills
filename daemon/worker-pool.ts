@@ -20,6 +20,7 @@
 
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { isDrivePrPrompt } from "../extensions/lib/drive-pr.ts";
 import {
 	clearParkRequest,
 	type ParkedEntry,
@@ -28,6 +29,9 @@ import {
 	removeParked,
 	writeParked,
 } from "../extensions/lib/park.ts";
+
+/** Drive-to-green and similar loops do real fix work per cycle; give them headroom. */
+const LONG_RUN_TIMEOUT_MS = 45 * 60_000;
 import type { Trigger } from "./inbox.ts";
 import { taduControl, type TaduControl } from "./tadu-control.ts";
 import { runWorker, type WorkerHandle, type WorkerResult, type WorkerSpec } from "./worker.ts";
@@ -237,10 +241,18 @@ export class WorkerPool {
 		}
 		const cwd = fresh ? (prepared?.cwd ?? this.o.cwd) : (item.entry.worktreePath ?? this.o.cwd);
 		const resumes = fresh ? 0 : item.entry.resumes;
+		// A long-running loop (drive-pr) needs a bigger per-cycle timeout; carried
+		// across park/resume so every cycle keeps it.
+		const timeoutMs = fresh
+			? isDrivePrPrompt(item.trigger.text)
+				? Math.max(this.o.timeoutMs ?? 0, LONG_RUN_TIMEOUT_MS)
+				: this.o.timeoutMs
+			: (item.entry.timeoutMs ?? this.o.timeoutMs);
 		const spec: WorkerSpec = {
 			id,
 			taskId,
-			prompt: fresh ? composePrompt(item.trigger) : item.entry.prompt,
+			// On resume, prepend a cycle counter so a looping worker can bound itself.
+			prompt: fresh ? composePrompt(item.trigger) : `[cycle ${resumes}/${this.o.maxResumes}] ${item.entry.prompt}`,
 			// Each run gets its own session dir so it can be resumed deterministically.
 			sessionDir: join(this.o.sessionDir, id),
 			cwd,
@@ -249,7 +261,7 @@ export class WorkerPool {
 			guardrailsPath: this.o.guardrailsPath,
 			toolExtensions: this.o.toolExtensions,
 			resume: !fresh,
-			timeoutMs: this.o.timeoutMs,
+			timeoutMs,
 		};
 		if (fresh) {
 			if (taskId) {
@@ -307,6 +319,7 @@ export class WorkerPool {
 				prompt: req.prompt,
 				reason: req.reason,
 				resumes: resumes + 1,
+				timeoutMs: spec.timeoutMs,
 			};
 			this.parked.set(spec.id, { entry, prepared });
 			writeParked(this.o.stateDir, entry);
@@ -330,7 +343,20 @@ export class WorkerPool {
 		const wtNote = wt?.changed ? `\n\nChanges left in worktree ${wt.path} (branch ${wt.branch}) for review.` : "";
 		const loopExceeded = req != null && resumes >= this.o.maxResumes;
 
-		if (result.ok && !loopExceeded) {
+		if (loopExceeded) {
+			// A still-working loop that ran out of resume budget is a hand-off, not a
+			// failure: park it back for review instead of marking it blocked.
+			if (taskId) {
+				this.o.tadu.move(taskId, this.o.successStatus);
+				this.o.tadu.comment(taskId, `Worker ${spec.id} paused: resume budget (${this.o.maxResumes} cycles) exhausted — left for review.${wtNote}`);
+			}
+			this.o.onDecision?.({
+				kind: "park-exhausted",
+				summary: `Worker ${spec.id} hit the resume budget (${this.o.maxResumes} cycles)${taskId ? ` (${taskId})` : ""}; paused for review.`,
+				detail: taskId ? { taduTask: taskId } : { worker: spec.id },
+			});
+			this.o.logger?.(`[pool] worker ${spec.id} paused: resume budget exhausted`);
+		} else if (result.ok) {
 			if (taskId) {
 				this.o.tadu.move(taskId, this.o.successStatus);
 				this.o.tadu.comment(taskId, `Worker ${spec.id} done.\n\n${result.outputText.slice(0, 1500) || "(no output)"}${wtNote}`);
@@ -342,11 +368,7 @@ export class WorkerPool {
 			});
 			this.o.logger?.(`[pool] worker ${spec.id} completed${wt?.changed ? ` (worktree preserved: ${wt.path})` : ""}`);
 		} else {
-			const reason = loopExceeded
-				? `exceeded ${this.o.maxResumes} resume cycles`
-				: result.timedOut
-					? "timed out"
-					: `exit ${result.code ?? "?"}`;
+			const reason = result.timedOut ? "timed out" : `exit ${result.code ?? "?"}`;
 			if (taskId) {
 				this.o.tadu.move(taskId, this.o.failureStatus);
 				this.o.tadu.comment(taskId, `Worker ${spec.id} failed (${reason}).\n\n${result.errorText.slice(0, 1500)}${wtNote}`);

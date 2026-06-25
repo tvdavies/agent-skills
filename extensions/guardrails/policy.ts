@@ -69,11 +69,28 @@ function isDangerousRm(command: string): boolean {
 		.some((token) => exact.test(token) || systemRoot.test(token));
 }
 
+const PROTECTED_BRANCH = /\b(main|master|develop|development|staging|production|prod|release)\b/;
+
 /** Force-push that targets a protected branch. */
 function isForcePushProtected(command: string): boolean {
 	if (!/\bgit\s+push\b/.test(command)) return false;
 	if (!/(--force(?!-with-lease)|(^|\s)-f(\s|$))/.test(command)) return false;
-	return /\b(main|master|production|prod|release)\b/.test(command) || /\s\+(main|master)/.test(command);
+	return PROTECTED_BRANCH.test(command) || /\s\+(main|master|develop|production)/.test(command);
+}
+
+/** A plain (non-force) push whose explicit refspec target is a protected branch.
+ *  Autonomous changes go on PRs — never straight to main/master/develop/etc.
+ *  Matches the protected name only as the WHOLE push target (right after the remote,
+ *  or as a refspec destination), so feature branches like `develop-x` or
+ *  `feature/main-menu` are not false-positives. A bare `git push` (current branch)
+ *  is intentionally not matched — the agent works on a feature branch. */
+function isPushToProtected(command: string): boolean {
+	if (!/\bgit\s+push\b/.test(command)) return false;
+	const P = "(?:main|master|develop|development|staging|production|prod|release)";
+	return (
+		new RegExp(`\\b(?:origin|upstream)\\s+(?:refs/heads/)?${P}(?:\\s|$|:)`).test(command) ||
+		new RegExp(`:(?:refs/heads/)?${P}(?:\\s|$)`).test(command)
+	);
 }
 
 /**
@@ -90,7 +107,9 @@ const RULES: Rule[] = [
 	{ id: "mkfs", tier: "banned", match: /\bmkfs(\.\w+)?\b/, reason: "Filesystem format." },
 	{ id: "dd-device", tier: "banned", match: /\bdd\b[^\n]*\bof=\/dev\/(sd|nvme|disk|hd|mmcblk)/, reason: "Raw write to a block device." },
 	{ id: "redirect-device", tier: "banned", match: />\s*\/dev\/(sd|nvme|disk|hd|mmcblk)/, reason: "Redirect over a block device." },
-	{ id: "git-force-push-protected", tier: "banned", match: isForcePushProtected, reason: "Force-push to a protected branch (main/master/production)." },
+	{ id: "git-force-push-protected", tier: "banned", match: isForcePushProtected, reason: "Force-push to a protected branch (main/master/develop/production…)." },
+	{ id: "git-push-protected", tier: "banned", match: isPushToProtected, reason: "Pushing straight to a protected branch — autonomous changes must go on a PR, not the base branch." },
+	{ id: "gh-pr-merge", tier: "banned", match: /\bgh\s+pr\s+merge\b/, reason: "Merging a PR is not permitted for the autonomous agent — a human merges." },
 	{ id: "git-history-rewrite", tier: "banned", match: /\bgit\s+filter-branch\b|\bgit[-\s]filter-repo\b/, reason: "Rewriting git history irreversibly." },
 	{ id: "terraform-destroy", tier: "banned", match: /\bterraform\s+destroy\b/, reason: "Tearing down infrastructure." },
 	{ id: "drop-database", tier: "banned", match: /\bdrop\s+database\b/i, reason: "Dropping a database." },

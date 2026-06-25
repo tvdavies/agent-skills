@@ -155,8 +155,14 @@ function main(): void {
 			console.error(`--drive-pr expects a positive PR number, got "${args.drivePr}"`);
 			process.exit(1);
 		}
+		// Require an explicit local repo path: the worker isolates the PR branch
+		// there. Without it the worker would resolve its own (agent-toolkit) cwd.
+		if (!args.repo || !args.repo.trim()) {
+			console.error("--drive-pr requires --repo <local-path-to-the-pr's-repo-clone>");
+			process.exit(1);
+		}
 		args.text = buildDrivePrPrompt(n, {
-			repo: args.repo,
+			repo: args.repo.trim(),
 			scriptsDir: join(repoDir, "skills", "address-pr-feedback", "scripts"),
 		});
 		args.source = args.source ?? "drive-pr";
@@ -166,7 +172,7 @@ function main(): void {
 		console.error(
 			"Usage: toolkit-trigger [--source <s>] [--dedupe <key>] [--no-tadu] <text...>\n" +
 				"       toolkit-trigger --cron-job <id>\n" +
-				"       toolkit-trigger --drive-pr <pr-number> [--repo <path-or-owner/name>]",
+				"       toolkit-trigger --drive-pr <pr-number> --repo <local-path-to-repo>",
 		);
 		process.exit(1);
 	}

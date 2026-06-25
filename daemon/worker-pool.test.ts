@@ -246,7 +246,8 @@ describe("WorkerPool", () => {
 		expect(pendings).toHaveLength(2);
 		expect(pendings[1]?.spec.id).toBe(spec.id);
 		expect(pendings[1]?.spec.resume).toBe(true);
-		expect(pendings[1]?.spec.prompt).toBe("re-check the PR");
+		expect(pendings[1]?.spec.prompt).toContain("re-check the PR");
+		expect(pendings[1]?.spec.prompt).toMatch(/^\[cycle 1\/\d+\] /); // resume carries a cycle counter
 
 		// Finish the resume terminally → task completes.
 		pendings[1]?.resolve(okResult(pendings[1].spec, "all green"));
@@ -276,7 +277,7 @@ describe("WorkerPool", () => {
 		expect(pendings[1]?.spec.resume).toBe(true);
 	});
 
-	it("ends a park loop that exceeds maxResumes", async () => {
+	it("hands off (does not fail) a park loop that exceeds maxResumes", async () => {
 		const p = pool(1, { maxResumes: 1 });
 		p.dispatch(trig("TASK-5"));
 		let spec = pendings[0]?.spec as WorkerSpec;
@@ -293,9 +294,11 @@ describe("WorkerPool", () => {
 		pendings[1]?.resolve(okResult(spec));
 		await flush();
 
-		// resumes(1) >= maxResumes(1) → terminal failure, not another park.
-		expect(moves).toContainEqual(["TASK-5", "blocked"]);
-		expect(escalations.some((s) => s.includes("TASK-5"))).toBe(true);
+		// resumes(1) >= maxResumes(1) → benign hand-off for review, NOT a failure.
+		expect(moves).toContainEqual(["TASK-5", "in-review"]);
+		expect(moves).not.toContainEqual(["TASK-5", "blocked"]);
+		expect(escalations).toHaveLength(0);
+		expect(decisions.some((d) => d.kind === "park-exhausted")).toBe(true);
 		expect(p.parkedCount()).toBe(0);
 	});
 });

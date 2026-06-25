@@ -24,6 +24,13 @@ describe("classifyCommand — banned", () => {
 		["dd if=/dev/zero of=/dev/sda bs=1M", "dd-device"],
 		["git push --force origin main", "git-force-push-protected"],
 		["git push -f origin master", "git-force-push-protected"],
+		["git push --force origin develop", "git-force-push-protected"],
+		["git push origin main", "git-push-protected"],
+		["git push -u origin main", "git-push-protected"],
+		["git push upstream develop", "git-push-protected"],
+		["git push origin HEAD:main", "git-push-protected"],
+		["gh pr merge 5469", "gh-pr-merge"],
+		["gh pr merge --squash 5469", "gh-pr-merge"],
 		["git filter-branch --tree-filter x HEAD", "git-history-rewrite"],
 		["terraform destroy -auto-approve", "terraform-destroy"],
 		["psql -c 'DROP DATABASE prod'", "drop-database"],
@@ -61,6 +68,10 @@ describe("classifyCommand — notify", () => {
 		["git push origin feature/x", "git-push"],
 		["git push --force-with-lease origin feature/x", "git-push"],
 		["git reset --hard HEAD~1", "git-reset-hard"],
+		// feature branches that merely CONTAIN a protected name are a normal push, not a protected-branch push
+		["git push origin develop-feature", "git-push"],
+		["git push origin feature/main-menu", "git-push"],
+		["git push -u origin lle-1234-fix-login", "git-push"],
 	])("flags %p for notify", (cmd, rule) => {
 		const c = classifyCommand(cmd);
 		expect(c.tier).toBe("notify");
