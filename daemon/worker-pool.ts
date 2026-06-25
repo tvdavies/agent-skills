@@ -55,12 +55,14 @@ export type WorkerPoolOptions = {
 	newId?: () => string;
 	/** Absolute path to the guardrails extension, loaded into every worker. */
 	guardrailsPath?: string;
+	/** Extra capability extensions loaded into every worker (e.g. worktree tools). */
+	toolExtensions?: string[];
 	/** Isolate each worker in a git worktree; omit to run workers in the base cwd. */
 	worktree?: WorktreeProvider;
 	logger?: (message: string) => void;
 };
 
-type Optional = "model" | "timeoutMs" | "onDecision" | "onEscalate" | "logger" | "guardrailsPath" | "worktree";
+type Optional = "model" | "timeoutMs" | "onDecision" | "onEscalate" | "logger" | "guardrailsPath" | "toolExtensions" | "worktree";
 
 export class WorkerPool {
 	private readonly o: Required<Omit<WorkerPoolOptions, Optional>> & Pick<WorkerPoolOptions, Optional>;
@@ -87,6 +89,7 @@ export class WorkerPool {
 			model: options.model,
 			timeoutMs: options.timeoutMs,
 			guardrailsPath: options.guardrailsPath,
+			toolExtensions: options.toolExtensions,
 			worktree: options.worktree,
 			onDecision: options.onDecision,
 			onEscalate: options.onEscalate,
@@ -160,6 +163,7 @@ export class WorkerPool {
 			piBin: this.o.piBin,
 			model: this.o.model,
 			guardrailsPath: this.o.guardrailsPath,
+			toolExtensions: this.o.toolExtensions,
 			timeoutMs: this.o.timeoutMs,
 		};
 		if (taskId) {

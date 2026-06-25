@@ -33,6 +33,8 @@ export type WorkerSpec = {
 	/** Absolute path to the guardrails extension, loaded so workers keep the
 	 *  safety floor despite running with --no-extensions. */
 	guardrailsPath?: string;
+	/** Extra capability extensions to load (e.g. the slim worktree tools). */
+	toolExtensions?: string[];
 	/** Hard timeout; the worker is killed past it. Default 15 min. */
 	timeoutMs?: number;
 };
@@ -64,8 +66,10 @@ const MAX_CAPTURE = 64 * 1024; // cap captured output so a chatty run can't grow
 /** Build the pi argument vector for a worker run. */
 export function workerArgs(spec: WorkerSpec): string[] {
 	const args = ["-p", "--no-extensions", "--session-dir", spec.sessionDir];
-	// Re-enable just the safety floor (an explicit -e survives --no-extensions).
+	// Re-enable just the safety floor + chosen capabilities (an explicit -e
+	// survives --no-extensions).
 	if (spec.guardrailsPath) args.push("-e", spec.guardrailsPath);
+	for (const ext of spec.toolExtensions ?? []) args.push("-e", ext);
 	if (spec.model) args.push("--model", spec.model);
 	args.push(spec.prompt);
 	return args;

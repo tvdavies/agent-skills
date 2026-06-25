@@ -47,6 +47,12 @@ describe("workerArgs", () => {
 		const args = workerArgs(spec({ guardrailsPath: "/repo/extensions/guardrails/index.ts" }));
 		expect(args.slice(args.indexOf("-e"), args.indexOf("-e") + 2)).toEqual(["-e", "/repo/extensions/guardrails/index.ts"]);
 	});
+
+	it("loads tool extensions after guardrails, in order", () => {
+		const args = workerArgs(spec({ guardrailsPath: "/g.ts", toolExtensions: ["/wt.ts", "/x.ts"] }));
+		const loaded = args.flatMap((a, i) => (a === "-e" ? [args[i + 1]] : []));
+		expect(loaded).toEqual(["/g.ts", "/wt.ts", "/x.ts"]);
+	});
 });
 
 describe("workerEnv", () => {

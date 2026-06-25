@@ -232,8 +232,12 @@ function runDaemon(): void {
 		cwd: process.env.AGENT_TOOLKIT_WORKER_CWD ?? repoDir,
 		piBin,
 		model,
-		// Workers run --no-extensions; re-load just the guardrails safety floor.
+		// Workers run --no-extensions; re-load just the guardrails safety floor
+		// plus the slim worktree tools so a worker can manage its own worktrees
+		// (adopt a PR branch, work across repos) when its task needs more than the
+		// deterministic per-worker worktree.
 		guardrailsPath,
+		toolExtensions: [join(repoDir, "extensions", "worktree-tools.ts")],
 		// Each worker gets its own git worktree (branch worker/<id>) so concurrent
 		// workers never collide or dirty the shared checkout.
 		worktree: isolateWorkers ? (baseCwd, id) => prepareWorktree(baseCwd, id, workerTreesDir) : undefined,

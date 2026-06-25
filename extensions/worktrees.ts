@@ -19,6 +19,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { type Static, Type } from "typebox";
 
 const LINEAR_FLAGS = ["--output", "json", "--compact", "--no-pager", "--quiet"];
 const CWD_CHANGE_TYPE = "workflow-cwd-change";
@@ -2136,6 +2137,217 @@ export default function (pi: ExtensionAPI) {
       await withLoading(ctx, "Yeeting current branch…", () =>
         runYeet(pi, ctx, args),
       );
+    },
+  });
+
+  registerWorktreeTools(pi);
+}
+
+// Tool registrations, separated so a slim worker-facing extension can load just
+// these (the agent's worktree autonomy) without the session/cwd machinery above.
+export function registerWorktreeTools(pi: ExtensionAPI) {
+  // --- Agent-callable worktree tools ------------------------------------------
+  // The /wt-* commands above are user-driven; these tools give the AGENT the
+  // same operations (create / adopt / list / status / merge / remove) so a
+  // worker or the resident can manage its own worktrees. Every tool takes an
+  // optional `repo` path, so an agent can work across multiple repos in one
+  // task — the deterministic per-worker worktree is only a safe default; the
+  // agent decides what isolation a task actually needs (e.g. adopt the branch
+  // a PR is already checked out on rather than create a fresh one).
+  const textResult = (text: string, details?: unknown) => ({
+    content: [{ type: "text" as const, text }],
+    details,
+  });
+  const resolveRepo = (repo?: string) => (repo ? resolve(expandHome(repo)) : process.cwd());
+  const branchWithPrefix = (name: string, config: WorktreeConfig) => {
+    const raw = normaliseBranchName(name);
+    return raw.startsWith(config.branchPrefix) ? raw : `${config.branchPrefix}${slug(raw)}`;
+  };
+  const repoParam = Type.Optional(
+    Type.String({
+      description: "Path inside the target git repo (any repo — enables multi-repo work). Defaults to the current directory.",
+    }),
+  );
+
+  const listSchema = Type.Object({ repo: repoParam });
+  pi.registerTool({
+    name: "worktree_list",
+    label: "list worktrees",
+    description: "List a repo's git worktrees (path + branch). Check this before creating one so you reuse an existing worktree instead of duplicating it.",
+    promptSnippet: "List git worktrees",
+    parameters: listSchema,
+    async execute(_id, params: Static<typeof listSchema>) {
+      try {
+        const repoRoot = await getGitRoot(pi, resolveRepo(params.repo));
+        const wts = await listWorktrees(pi, repoRoot);
+        const text = wts.length ? wts.map((w) => `${w.branch ?? "(detached)"}  ${w.path}`).join("\n") : "No worktrees.";
+        return textResult(text, { worktrees: wts });
+      } catch (e) {
+        return textResult(`worktree_list failed: ${(e as Error).message}`, { ok: false });
+      }
+    },
+  });
+
+  const newSchema = Type.Object({
+    name: Type.String({ description: "Branch/work name. Prefixed automatically if it lacks the configured prefix." }),
+    base: Type.Optional(Type.String({ description: "Base ref to branch from (default: latest origin default branch)." })),
+    repo: repoParam,
+  });
+  pi.registerTool({
+    name: "worktree_new",
+    label: "new worktree",
+    description: "Create an isolated git worktree on a new branch for fresh work. Returns the path to run commands in.",
+    promptSnippet: "Create a new git worktree",
+    parameters: newSchema,
+    async execute(_id, params: Static<typeof newSchema>) {
+      try {
+        const config = getConfig();
+        const repoRoot = await getGitRoot(pi, resolveRepo(params.repo));
+        const branch = branchWithPrefix(params.name, config);
+        const base = params.base ?? `origin/${await getDefaultBranch(pi, repoRoot, config)}`;
+        const path = await ensureWorktree(pi, repoRoot, branch, base, config);
+        return textResult(`Worktree ready at ${path} on branch ${branch}. Run your work there (cwd ${path}).`, { path, branch });
+      } catch (e) {
+        return textResult(`worktree_new failed: ${(e as Error).message}`, { ok: false });
+      }
+    },
+  });
+
+  const adoptSchema = Type.Object({
+    branch: Type.Optional(Type.String({ description: "Existing branch to check out in its own worktree." })),
+    pr: Type.Optional(Type.String({ description: "PR number whose head branch to adopt (uses gh)." })),
+    repo: repoParam,
+  });
+  pi.registerTool({
+    name: "worktree_adopt",
+    label: "adopt worktree",
+    description: "Check out an EXISTING branch (or a PR's branch) in its own worktree — use this for reviewing/continuing work that already has a branch, instead of creating a fresh one.",
+    promptSnippet: "Adopt an existing branch into a worktree",
+    parameters: adoptSchema,
+    async execute(_id, params: Static<typeof adoptSchema>) {
+      try {
+        const config = getConfig();
+        const repoRoot = await getGitRoot(pi, resolveRepo(params.repo));
+        let branch = params.branch ? normaliseBranchName(params.branch) : undefined;
+        if (!branch && params.pr) branch = (await branchForPullRequest(pi, repoRoot, params.pr)).branch;
+        if (!branch) return textResult("Provide either `branch` or `pr`.", { ok: false });
+        const path = await ensureAdoptedWorktree(pi, repoRoot, branch, config);
+        return textResult(`Adopted ${branch} at ${path}. Work there (cwd ${path}).`, { path, branch });
+      } catch (e) {
+        return textResult(`worktree_adopt failed: ${(e as Error).message}`, { ok: false });
+      }
+    },
+  });
+
+  const statusSchema = Type.Object({
+    path: Type.Optional(Type.String({ description: "Worktree path (default: current directory)." })),
+  });
+  pi.registerTool({
+    name: "worktree_status",
+    label: "worktree status",
+    description: "Show a worktree's current branch and how many files have changed.",
+    promptSnippet: "Show worktree status",
+    parameters: statusSchema,
+    async execute(_id, params: Static<typeof statusSchema>) {
+      try {
+        const cwd = params.path ? resolve(expandHome(params.path)) : process.cwd();
+        return textResult(await statusLine(pi, cwd), { ok: true });
+      } catch (e) {
+        return textResult(`worktree_status failed: ${(e as Error).message}`, { ok: false });
+      }
+    },
+  });
+
+  const mergeSchema = Type.Object({
+    target: Type.String({ description: "Branch to integrate the work INTO (e.g. main)." }),
+    branch: Type.Optional(Type.String({ description: "Source branch to integrate (default: current branch)." })),
+    mode: Type.Optional(
+      Type.Union([Type.Literal("squash"), Type.Literal("merge"), Type.Literal("cherry-pick")], {
+        description: "Integration mode (default: the configured mode).",
+      }),
+    ),
+    repo: repoParam,
+  });
+  pi.registerTool({
+    name: "worktree_merge",
+    label: "merge worktree",
+    description: "Integrate a worktree's branch into a target branch (squash/merge/cherry-pick). Reports conflicts for you to resolve; does not remove the worktree.",
+    promptSnippet: "Integrate a worktree branch into a target",
+    parameters: mergeSchema,
+    async execute(_id, params: Static<typeof mergeSchema>) {
+      try {
+        const config = getConfig();
+        const repoRoot = await getGitRoot(pi, resolveRepo(params.repo));
+        const branch = params.branch ?? (await getCurrentBranch(pi, process.cwd()));
+        const mode = params.mode ?? config.defaultIntegrateMode;
+        const worktrees = await listWorktrees(pi, repoRoot);
+        const src = worktrees.find((w) => w.branch === branch);
+        if (src) {
+          const dirty = (await pi.exec("git", ["status", "--porcelain"], { cwd: src.path })).stdout.trim();
+          if (dirty) return textResult(`Commit or stash changes in ${branch} before merging.`, { ok: false });
+        }
+        const targetCheckout = worktrees.find((w) => w.branch === params.target)?.path ?? repoRoot;
+        const co = await pi.exec("git", ["checkout", params.target], { cwd: targetCheckout });
+        if (co.code !== 0) return textResult(`Could not checkout ${params.target}: ${co.stderr.trim()}`, { ok: false });
+        const args =
+          mode === "squash"
+            ? ["merge", "--squash", branch]
+            : mode === "merge"
+              ? ["merge", "--no-ff", branch]
+              : ["cherry-pick", `${params.target}..${branch}`];
+        const m = await pi.exec("git", args, { cwd: targetCheckout });
+        if (m.code !== 0) {
+          return textResult(`Merge (${mode}) of ${branch} into ${params.target} failed — resolve manually:\n${m.stderr.trim() || m.stdout.trim()}`, {
+            ok: false,
+            conflict: true,
+            branch,
+            target: params.target,
+          });
+        }
+        const note = mode === "squash" ? " Staged changes are ready to commit." : "";
+        return textResult(`Integrated ${branch} into ${params.target} using ${mode}.${note} Remove the worktree with worktree_remove when done.`, {
+          ok: true,
+          branch,
+          target: params.target,
+          mode,
+        });
+      } catch (e) {
+        return textResult(`worktree_merge failed: ${(e as Error).message}`, { ok: false });
+      }
+    },
+  });
+
+  const removeSchema = Type.Object({
+    branch: Type.Optional(Type.String({ description: "Branch whose worktree to remove." })),
+    path: Type.Optional(Type.String({ description: "Worktree path to remove (alternative to branch)." })),
+    deleteBranch: Type.Optional(Type.Boolean({ description: "Also delete the local branch (default false)." })),
+    repo: repoParam,
+  });
+  pi.registerTool({
+    name: "worktree_remove",
+    label: "remove worktree",
+    description: "Remove a git worktree (and optionally its local branch) once its work is integrated or abandoned.",
+    promptSnippet: "Remove a git worktree",
+    parameters: removeSchema,
+    async execute(_id, params: Static<typeof removeSchema>) {
+      try {
+        const config = getConfig();
+        const repoRoot = await getGitRoot(pi, resolveRepo(params.repo));
+        let target = params.path ? resolve(expandHome(params.path)) : undefined;
+        let branch = params.branch;
+        if (!target && branch) {
+          const wt = await findWorktree(pi, repoRoot, branch, config);
+          target = wt?.path;
+          branch = wt?.branch ?? branch;
+        }
+        if (!target) return textResult("Provide a `branch` or `path` to remove.", { ok: false });
+        const rm = await pi.exec("git", ["worktree", "remove", "--force", target], { cwd: repoRoot });
+        if (rm.code !== 0) return textResult(`Could not remove worktree ${target}: ${rm.stderr.trim()}`, { ok: false });
+        if (params.deleteBranch && branch) await pi.exec("git", ["branch", "-D", branch], { cwd: repoRoot });
+        return textResult(`Removed worktree ${target}${params.deleteBranch && branch ? ` and branch ${branch}` : ""}.`, { ok: true });
+      } catch (e) {
+        return textResult(`worktree_remove failed: ${(e as Error).message}`, { ok: false });
+      }
     },
   });
 }
