@@ -49,6 +49,14 @@ echo "==> Agent Toolkit install (repo: $REPO)"
 echo "==> [1/5] package setup"
 "$REPO/scripts/bootstrap.sh"
 
+# Saved workflows: discovered in-repo from .pi/workflows; copy to the user
+# workflow dir so /debug-issue, /implement-ticket, /review-pr work from any repo.
+if [ -d "$REPO/.pi/workflows" ]; then
+  WF_DIR="$HOME/.pi/agent/workflows"
+  mkdir -p "$WF_DIR"
+  cp "$REPO/.pi/workflows/"*.ts "$WF_DIR/" 2>/dev/null && echo "==> synced saved workflows -> $WF_DIR"
+fi
+
 if [ "$WITH_SERVICE" != true ]; then
   echo "==> Done (extensions only). Run /reload in a Pi session to load them."
   exit 0
