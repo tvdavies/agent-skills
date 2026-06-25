@@ -27,8 +27,8 @@ import { brainRoot } from "../extensions/lib/paths.ts";
 import { INITIAL_RUNS_STATE, recordRun, type RunsState } from "../extensions/lib/runs.ts";
 import { applyCumulativeCost, INITIAL_SPEND_STATE, type SpendState } from "../extensions/lib/spend.ts";
 import { writeAnswer } from "../extensions/lib/park.ts";
-import { agentTaduEnv } from "../extensions/lib/tadu-actor.ts";
-import { ensureWorkspace, getTask, listTasks, readConfig, taduRoot, workspaceExists } from "../extensions/lib/tadu.ts";
+import { agentTaduEnv, lastMoveOrigin } from "../extensions/lib/tadu-actor.ts";
+import { ensureWorkspace, getTask, listTasks, readConfig, readEvents, taduRoot, workspaceExists } from "../extensions/lib/tadu.ts";
 import { humanTaduControl, taduControl } from "../daemon/tadu-control.ts";
 import { ControlLoop } from "../daemon/control-loop.ts";
 import { parseHoursWindow, resolveMinIntervalMinutes } from "../extensions/heartbeat/schedule-gate.ts";
@@ -305,14 +305,19 @@ function runDaemon(): void {
 	// so they resume on schedule rather than being treated as orphans.
 	workerPool.loadParked();
 
-	// Reconcile orphaned work: any task still in-progress at boot had its worker
-	// killed with the previous daemon (the pool's active set is in-memory only) —
-	// EXCEPT tasks whose session is parked (legitimately dormant, re-armed above).
+	// Reconcile orphaned work: a task still in-progress at boot had its worker killed
+	// with the previous daemon (the pool's active set is in-memory only). Two guards:
+	//  - skip parked sessions (legitimately dormant, re-armed above);
+	//  - skip cards the AGENT did not put in-progress — only reconcile work whose most
+	//    recent move into in-progress was agent-actored, so a card a human dragged in to
+	//    track their own work is never yanked to blocked on a restart.
 	try {
 		const control = taduControl();
 		const parked = workerPool.parkedTaskIds();
+		const events = readEvents(100_000);
 		for (const task of listTasks()) {
 			if (task.status !== "in-progress" || parked.has(task.id)) continue;
+			if (lastMoveOrigin(events, task.id, "in-progress") !== "agent") continue;
 			control.move(task.id, "blocked");
 			control.comment(task.id, "Worker did not finish (daemon restarted); moved to blocked for review.");
 			recordDecision({

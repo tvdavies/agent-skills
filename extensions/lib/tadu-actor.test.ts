@@ -5,6 +5,7 @@ import {
 	agentTaduEnv,
 	CONTROL_EVENT_TYPES,
 	isHumanControlEvent,
+	lastMoveOrigin,
 } from "./tadu-actor";
 import type { TaduEvent } from "./tadu";
 
@@ -41,6 +42,43 @@ describe("isHumanControlEvent", () => {
 
 	it("reacts to exactly the move and comment event types", () => {
 		expect([...CONTROL_EVENT_TYPES].sort()).toEqual(["task.commented", "task.moved"]);
+	});
+});
+
+describe("lastMoveOrigin", () => {
+	const mv = (seq: number, task: string, to: string, actor: string): TaduEvent => ({
+		seq,
+		time: "t",
+		type: "task.moved",
+		task,
+		actor,
+		data: { from: "ready", to },
+	});
+
+	it("returns the origin of the most recent move into the lane", () => {
+		const events: TaduEvent[] = [
+			mv(1, "TASK-1", "in-progress", AGENT_ACTOR), // agent started it
+			mv(2, "TASK-1", "blocked", AGENT_ACTOR),
+			mv(3, "TASK-1", "in-progress", "Tom Davies"), // human re-dragged it
+		];
+		expect(lastMoveOrigin(events, "TASK-1", "in-progress")).toBe("human");
+	});
+
+	it("identifies agent-owned in-progress work (a worker the pool started)", () => {
+		const events: TaduEvent[] = [mv(1, "TASK-1", "in-progress", AGENT_ACTOR)];
+		expect(lastMoveOrigin(events, "TASK-1", "in-progress")).toBe("agent");
+	});
+
+	it("ignores moves of other tasks and to other lanes", () => {
+		const events: TaduEvent[] = [
+			mv(1, "TASK-2", "in-progress", AGENT_ACTOR),
+			mv(2, "TASK-1", "in-review", AGENT_ACTOR),
+		];
+		expect(lastMoveOrigin(events, "TASK-1", "in-progress")).toBeUndefined();
+	});
+
+	it("returns undefined when there is no recorded move into the lane", () => {
+		expect(lastMoveOrigin([], "TASK-1", "in-progress")).toBeUndefined();
 	});
 });
 

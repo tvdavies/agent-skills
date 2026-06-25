@@ -56,6 +56,22 @@ export function isHumanControlEvent(event: TaduEvent): boolean {
 }
 
 /**
+ * The origin of the most recent move that placed `taskId` into `lane`, from the
+ * event log (oldest-first). Lets the boot reconcile tell an agent worker orphaned by
+ * a restart from a card a human dragged in to track their own work — only the former
+ * should be moved. Returns undefined when no such move is recorded.
+ */
+export function lastMoveOrigin(events: TaduEvent[], taskId: string, lane: string): TaduEventOrigin | undefined {
+	for (let i = events.length - 1; i >= 0; i -= 1) {
+		const e = events[i];
+		if (e && e.type === "task.moved" && e.task === taskId && (e.data as { to?: string } | undefined)?.to === lane) {
+			return actorOrigin(e.actor);
+		}
+	}
+	return undefined;
+}
+
+/**
  * Stamp an environment so a spawned `tadu` write is attributed to the agent. Use
  * for every system-originated write so it is never mistaken for human intent by
  * the watch loop.
