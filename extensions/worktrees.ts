@@ -1,7 +1,18 @@
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
+import {
+  DynamicBorder,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+  Container,
+  fuzzyFilter,
+  Input,
+  type Focusable,
+  type SelectItem,
+  SelectList,
+  type SelectListTheme,
+  Text,
+} from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -146,6 +157,12 @@ function slug(input: string) {
 
 function shellQuote(input: string) {
   return `'${input.replace(/'/g, `'\\''`)}'`;
+}
+
+function stashRecoveryInstructions(repoPath: string, stashHash?: string) {
+  return stashHash
+    ? `Uncommitted changes were stashed as ${stashHash}. Recover with: git -C ${shellQuote(repoPath)} stash apply ${stashHash}`
+    : `Uncommitted changes may have been stashed. Check with: git -C ${shellQuote(repoPath)} stash list`;
 }
 
 function parseFlags(args: string) {
@@ -430,6 +447,219 @@ function worktreeLabel(wt: WorktreeInfo, config: WorktreeConfig) {
 
 function pathFromWorktreeLabel(label: string) {
   return label.split(" — ").at(-1);
+}
+
+type KeybindingsLike = {
+  matches: (keyData: string, action: string) => boolean;
+};
+
+type SearchableSelectDialogOptions = {
+  title: string;
+  items: SelectItem[];
+  getMaxVisible: () => number;
+  keybindings: KeybindingsLike;
+  theme: SelectListTheme;
+  getSearchText: (item: SelectItem) => string;
+  formatTitle: (text: string) => string;
+  formatHint: (text: string) => string;
+  formatBorder: (text: string) => string;
+  requestRender: () => void;
+  onSelect: (item: SelectItem) => void;
+  onCancel: () => void;
+};
+
+class SearchableSelectDialog extends Container implements Focusable {
+  private readonly searchInput = new Input();
+  private readonly listContainer = new Container();
+  private selectList!: SelectList;
+  private filteredItems: SelectItem[] = [];
+  private selectedIndex = 0;
+  private listMaxVisible = 1;
+  private _focused = false;
+
+  get focused() {
+    return this._focused;
+  }
+
+  set focused(value: boolean) {
+    this._focused = value;
+    this.searchInput.focused = value;
+  }
+
+  constructor(private readonly options: SearchableSelectDialogOptions) {
+    super();
+
+    this.addChild(new DynamicBorder(options.formatBorder));
+    this.addChild(new Text(options.formatTitle(options.title), 1, 0));
+    this.addChild(
+      new Text(options.formatHint("Type to filter by branch, folder, or path"), 1, 0),
+    );
+    this.addChild(this.searchInput);
+    this.addChild(this.listContainer);
+    this.addChild(
+      new Text(options.formatHint("↑↓ navigate • enter switch • esc cancel"), 1, 0),
+    );
+    this.addChild(new DynamicBorder(options.formatBorder));
+
+    this.searchInput.onSubmit = () => {
+      const item = this.selectList.getSelectedItem();
+      if (item) this.options.onSelect(item);
+    };
+
+    this.rebuildList("");
+  }
+
+  private getListMaxVisible(items: SelectItem[]) {
+    return Math.max(
+      1,
+      Math.min(this.options.getMaxVisible(), Math.max(items.length, 1)),
+    );
+  }
+
+  private buildList(items: SelectItem[]) {
+    this.listMaxVisible = this.getListMaxVisible(items);
+    const list = new SelectList(items, this.listMaxVisible, this.options.theme, {
+      minPrimaryColumnWidth: 24,
+      maxPrimaryColumnWidth: 48,
+    });
+
+    this.selectedIndex = Math.max(
+      0,
+      Math.min(this.selectedIndex, Math.max(items.length - 1, 0)),
+    );
+    list.setSelectedIndex(this.selectedIndex);
+    list.onSelect = this.options.onSelect;
+    list.onCancel = this.options.onCancel;
+    return list;
+  }
+
+  private rebuildList(query: string, resetSelection = false) {
+    this.filteredItems = query.trim()
+      ? fuzzyFilter(this.options.items, query, this.options.getSearchText)
+      : this.options.items;
+
+    if (resetSelection) this.selectedIndex = 0;
+    this.selectList = this.buildList(this.filteredItems);
+    this.listContainer.clear();
+    this.listContainer.addChild(this.selectList);
+  }
+
+  private moveSelection(delta: number) {
+    if (this.filteredItems.length === 0) return;
+    this.selectedIndex =
+      (this.selectedIndex + delta + this.filteredItems.length) %
+      this.filteredItems.length;
+    this.selectList.setSelectedIndex(this.selectedIndex);
+  }
+
+  private selectCurrent() {
+    const item = this.filteredItems[this.selectedIndex];
+    if (item) this.options.onSelect(item);
+  }
+
+  override render(width: number) {
+    if (this.getListMaxVisible(this.filteredItems) !== this.listMaxVisible) {
+      this.rebuildList(this.searchInput.getValue());
+    }
+    return super.render(width);
+  }
+
+  handleInput(data: string) {
+    const keybindings = this.options.keybindings;
+    const isCancel = keybindings.matches(data, "tui.select.cancel");
+    const isUp = keybindings.matches(data, "tui.select.up");
+    const isDown = keybindings.matches(data, "tui.select.down");
+    const isConfirm = keybindings.matches(data, "tui.select.confirm");
+
+    if (isCancel) {
+      this.options.onCancel();
+      this.options.requestRender();
+      return;
+    }
+
+    if (isUp || isDown || isConfirm) {
+      if (isUp) this.moveSelection(-1);
+      if (isDown) this.moveSelection(1);
+      if (isConfirm) this.selectCurrent();
+      this.options.requestRender();
+      return;
+    }
+
+    const before = this.searchInput.getValue();
+    this.searchInput.handleInput(data);
+    const after = this.searchInput.getValue();
+
+    if (after !== before) this.rebuildList(after, true);
+    this.options.requestRender();
+  }
+}
+
+function worktreeSelectItem(
+  wt: WorktreeInfo,
+  config: WorktreeConfig,
+): SelectItem {
+  const branch = wt.branch ?? "detached";
+  const suffix = isManagedWorktree(wt.path, config) ? basename(wt.path) : wt.path;
+
+  return {
+    value: resolve(wt.path),
+    label: branch,
+    description: suffix,
+  };
+}
+
+async function selectWorktreeFromUi(
+  ctx: ExtensionCommandContext,
+  worktrees: WorktreeInfo[],
+  config: WorktreeConfig,
+) {
+  const items = worktrees.map((wt) => worktreeSelectItem(wt, config));
+  const worktreeByPath = new Map(worktrees.map((wt) => [resolve(wt.path), wt]));
+
+  const selectedPath = await ctx.ui.custom<string | null>(
+    (tui, theme, keybindings, done) => {
+      const getMaxVisible = () => {
+        const overlayRows = Math.max(
+          1,
+          Math.min(Math.floor(tui.terminal.rows * 0.8), tui.terminal.rows - 4),
+        );
+        return Math.max(1, overlayRows - 8);
+      };
+
+      return new SearchableSelectDialog({
+        title: "Switch to worktree",
+        items,
+        getMaxVisible,
+        keybindings,
+        theme: {
+          selectedPrefix: (text) => theme.fg("accent", text),
+          selectedText: (text) => theme.fg("accent", text),
+          description: (text) => theme.fg("muted", text),
+          scrollInfo: (text) => theme.fg("dim", text),
+          noMatch: () => theme.fg("warning", "  No matching worktrees"),
+        },
+        getSearchText: (item) =>
+          `${item.label} ${item.description ?? ""} ${item.value} ${basename(item.value)}`,
+        formatTitle: (text) => theme.fg("accent", theme.bold(text)),
+        formatHint: (text) => theme.fg("dim", text),
+        formatBorder: (text) => theme.fg("accent", text),
+        requestRender: () => tui.requestRender(),
+        onSelect: (item) => done(item.value),
+        onCancel: () => done(null),
+      });
+    },
+    {
+      overlay: true,
+      overlayOptions: {
+        width: "90%",
+        minWidth: 50,
+        maxHeight: "80%",
+        margin: 2,
+      },
+    },
+  );
+
+  return selectedPath ? worktreeByPath.get(resolve(selectedPath)) : undefined;
 }
 
 async function listWorktrees(
@@ -1510,15 +1740,7 @@ export default function (pi: ExtensionAPI) {
       if (args.trim()) {
         selected = await findWorktree(pi, repoRoot, args.trim(), config);
       } else {
-        const labels = worktrees.map((wt) => worktreeLabel(wt, config));
-        const selectedLabel = await ctx.ui.select("Switch to worktree", labels);
-        const selectedSuffix = selectedLabel
-          ? pathFromWorktreeLabel(selectedLabel)
-          : undefined;
-        selected = worktrees.find(
-          (wt) =>
-            wt.path === selectedSuffix || basename(wt.path) === selectedSuffix,
-        );
+        selected = await selectWorktreeFromUi(ctx, worktrees, config);
       }
       if (selected) await switchCwd(pi, ctx, selected.path, selected.branch);
     },
@@ -1719,47 +1941,128 @@ export default function (pi: ExtensionAPI) {
       }
       const branch = await getCurrentBranch(pi, worktreePath);
       const mainPath = await getMainWorktreePath(pi, worktreePath);
-      const dirty = (
-        await pi.exec("git", ["status", "--porcelain"], { cwd: worktreePath })
-      ).stdout.trim();
-      if (dirty && !flags.has("--force")) {
-        throw new Error(
-          "Commit, stash, or pass --force before removing a dirty worktree.",
-        );
-      }
+      const dirty = await execOk(
+        pi,
+        "git",
+        ["status", "--porcelain"],
+        worktreePath,
+        `Could not check worktree status for ${worktreePath}.`,
+      );
+      const force = flags.has("--force");
+      const willStash = Boolean(dirty && !force);
+      const willDiscard = Boolean(dirty && force);
+      const branchCleanup = branch?.startsWith(config.branchPrefix)
+        ? `\nLocal branch ${branch} will be ${force ? "force-deleted" : "deleted if fully merged"}.`
+        : "";
+      const dirtyWarning = willDiscard
+        ? "Uncommitted changes will be permanently discarded.\n"
+        : willStash
+          ? "Uncommitted changes will be saved to git stash before removal.\n"
+          : "";
       const ok =
-        flags.has("--yes") ||
+        (flags.has("--yes") && !dirty && !force) ||
         (await ctx.ui.confirm(
           "Finish worktree?",
-          `${dirty ? "This worktree has uncommitted changes and will be force removed.\n\n" : ""}Switch back to ${mainPath} and remove ${worktreePath}?`,
+          `${dirtyWarning}Switch back to ${mainPath} and remove ${worktreePath}?${branchCleanup}`,
         ));
       if (!ok) return;
+
+      let stashHash: string | undefined;
+      let stashMayExist = false;
       await withLoading(
         ctx,
         `Removing ${branch || basename(worktreePath)}…`,
         async () => {
-          await switchCwd(pi, ctx, mainPath);
-          const removeArgs = ["worktree", "remove"];
-          if (dirty) removeArgs.push("--force");
-          removeArgs.push(worktreePath);
-          assertOk(
-            await pi.exec("git", removeArgs, { cwd: mainPath }),
-            `Could not remove worktree ${worktreePath}.`,
-          );
-          if (branch?.startsWith(config.branchPrefix)) {
-            const deleteArgs = [
-              "branch",
-              flags.has("--force") ? "-D" : "-d",
-              branch,
-            ];
-            assertOk(
-              await pi.exec("git", deleteArgs, { cwd: mainPath }),
-              `Removed worktree, but could not delete local branch ${branch}. It may not be merged; use /wt-abandon ${branch} to force delete it.`,
+          try {
+            if (willStash) {
+              ctx.ui.setWorkingMessage("Stashing uncommitted changes…");
+              const previousStash = await pi.exec(
+                "git",
+                ["rev-parse", "--verify", "--quiet", "stash@{0}"],
+                { cwd: worktreePath },
+              );
+              const previousStashHash =
+                previousStash.code === 0 ? previousStash.stdout.trim() : undefined;
+              await execOk(
+                pi,
+                "git",
+                [
+                  "stash",
+                  "push",
+                  "-u",
+                  "-m",
+                  `pi wt-done ${branch || basename(worktreePath)} ${new Date().toISOString()}`,
+                ],
+                worktreePath,
+                "Could not stash uncommitted changes; worktree was not removed.",
+              );
+              stashMayExist = true;
+              const newStashHash = await execOk(
+                pi,
+                "git",
+                ["rev-parse", "--verify", "stash@{0}"],
+                worktreePath,
+                "Stashed changes but could not record stash ref.",
+              );
+              if (newStashHash === previousStashHash) {
+                throw new Error(
+                  "Stash command completed but did not create a new stash; worktree was not removed.",
+                );
+              }
+              stashHash = newStashHash;
+              const remaining = await execOk(
+                pi,
+                "git",
+                ["status", "--porcelain"],
+                worktreePath,
+                "Stashed changes but could not re-check worktree status.",
+              );
+              if (remaining) {
+                throw new Error(
+                  "Stashed changes, but the worktree is still dirty; worktree was not removed.",
+                );
+              }
+            }
+
+            ctx.ui.setWorkingMessage(`Switching back to ${mainPath}…`);
+            await switchCwd(pi, ctx, mainPath);
+            ctx.ui.setWorkingMessage(`Removing ${worktreePath}…`);
+            const removeArgs = ["worktree", "remove"];
+            if (dirty && force) removeArgs.push("--force");
+            removeArgs.push(worktreePath);
+            await execOk(
+              pi,
+              "git",
+              removeArgs,
+              mainPath,
+              `Could not remove worktree ${worktreePath}.`,
             );
+            if (branch?.startsWith(config.branchPrefix)) {
+              ctx.ui.setWorkingMessage(`Deleting local branch ${branch}…`);
+              const deleteArgs = ["branch", force ? "-D" : "-d", branch];
+              await execOk(
+                pi,
+                "git",
+                deleteArgs,
+                mainPath,
+                `Removed worktree, but could not delete local branch ${branch}. It may not be merged; use /wt-abandon ${branch} to force delete it.`,
+              );
+            }
+          } catch (error) {
+            if (stashMayExist) {
+              const message = error instanceof Error ? error.message : String(error);
+              throw new Error(
+                `${message}\n\n${stashRecoveryInstructions(mainPath, stashHash)}`,
+              );
+            }
+            throw error;
           }
         },
       );
-      ctx.ui.notify(`Finished ${branch || worktreePath}`, "info");
+      const stashDetail = stashHash
+        ? ` Stashed uncommitted changes as ${stashHash}; recover with \`git -C ${shellQuote(mainPath)} stash apply ${stashHash}\`.`
+        : "";
+      ctx.ui.notify(`Finished ${branch || worktreePath}.${stashDetail}`, "info");
     },
   });
 
