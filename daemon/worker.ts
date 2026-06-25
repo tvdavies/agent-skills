@@ -14,6 +14,7 @@
 
 import { type ChildProcess, spawn as nodeSpawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
+import { AGENT_ACTOR } from "../extensions/lib/tadu-actor.ts";
 
 export type WorkerSpec = {
 	/** Stable run id (also the session/log label). */
@@ -171,5 +172,9 @@ export function workerEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
 	for (const [key, value] of Object.entries(env)) {
 		if (!denied.test(key)) out[key] = value;
 	}
+	// A worker is the agent doing work: any `tadu` write it makes (progress
+	// comments, lane moves via a skill) is attributed to the agent, never the
+	// human — so the watch loop does not treat the agent's own work as control input.
+	out.TADU_ACTOR = AGENT_ACTOR;
 	return out;
 }

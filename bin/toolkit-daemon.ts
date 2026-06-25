@@ -26,7 +26,7 @@ import { brainRoot } from "../extensions/lib/paths.ts";
 import { INITIAL_RUNS_STATE, recordRun, type RunsState } from "../extensions/lib/runs.ts";
 import { applyCumulativeCost, INITIAL_SPEND_STATE, type SpendState } from "../extensions/lib/spend.ts";
 import { writeAnswer } from "../extensions/lib/park.ts";
-import { ensureWorkspace, listTasks, taduRoot } from "../extensions/lib/tadu.ts";
+import { ensureWorkspace, listTasks, taduRoot, workspaceExists } from "../extensions/lib/tadu.ts";
 import { taduControl } from "../daemon/tadu-control.ts";
 import { parseHoursWindow, resolveMinIntervalMinutes } from "../extensions/heartbeat/schedule-gate.ts";
 import { Dashboard } from "../daemon/dashboard.ts";
@@ -44,6 +44,7 @@ import { classifyTrigger } from "../daemon/route.ts";
 import { RpcClient } from "../daemon/rpc-client.ts";
 import { SlackBridge } from "../daemon/slack.ts";
 import { Supervisor } from "../daemon/supervisor.ts";
+import { TaduWatcher } from "../daemon/tadu-watch.ts";
 import { WebhookServer } from "../daemon/webhook-server.ts";
 import { WorkerPool } from "../daemon/worker-pool.ts";
 import { prepareWorktree } from "../daemon/worktree.ts";
@@ -426,8 +427,31 @@ function runDaemon(): void {
 	});
 	dashboard.start().catch((e) => console.error(`[dashboard] failed to start: ${e}`));
 
+	// Control-plane watcher: observe the human acting on the board (lane drags,
+	// comments) live via `tadu watch`. The actor model splits the agent's own
+	// writes from the human's; for now a human control event is only recorded as a
+	// decision (no reaction yet — the control loop is the next phase). Started only
+	// when the workspace exists, so a missing `tadu` binary doesn't hot-loop.
+	const taduWatcher = workspaceExists()
+		? new TaduWatcher({
+				cwd: taduRoot(),
+				onHumanEvent: (event) => {
+					const verb = event.type === "task.moved" ? "moved" : "commented on";
+					const lane = (event.data as { to?: string } | undefined)?.to;
+					recordDecision({
+						kind: "trigger",
+						summary: `Human ${verb} ${event.task ?? "a task"}${lane ? ` → ${lane}` : ""} (actor ${event.actor ?? "unknown"})`,
+						source: "control-plane",
+						detail: { taduTask: event.task, eventType: event.type, actor: event.actor, ...(lane ? { lane } : {}) },
+					});
+				},
+				logger: (m) => console.error(m),
+			})
+		: undefined;
+	taduWatcher?.start();
+
 	console.error(
-		`[toolkit-daemon] started (instance=${instance}, slack=${slack ? "on" : "off"}, webhook=${webhook ? "on" : "off"}, dashboard=on, workers=${Number(process.env.AGENT_TOOLKIT_WORKER_CONCURRENCY ?? 2)}, spendCap=${dailyCapUsd > 0 ? `$${dailyCapUsd}` : "off"}, runsCap=${maxRunsPerDay > 0 ? maxRunsPerDay : "off"})`,
+		`[toolkit-daemon] started (instance=${instance}, slack=${slack ? "on" : "off"}, webhook=${webhook ? "on" : "off"}, dashboard=on, taduWatch=${taduWatcher ? "on" : "off"}, workers=${Number(process.env.AGENT_TOOLKIT_WORKER_CONCURRENCY ?? 2)}, spendCap=${dailyCapUsd > 0 ? `$${dailyCapUsd}` : "off"}, runsCap=${maxRunsPerDay > 0 ? maxRunsPerDay : "off"})`,
 	);
 
 	let shuttingDown = false;
@@ -438,6 +462,7 @@ function runDaemon(): void {
 		if (spendTimer) clearInterval(spendTimer);
 		clearInterval(stateTimer);
 		clearTimeout(initialStateTimer);
+		taduWatcher?.stop();
 		notifyWatcher?.stop();
 		await dashboard.stop();
 		// Stop the supervisor first so the inbox poll can't dispatch into a pool

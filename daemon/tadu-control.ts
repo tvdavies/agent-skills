@@ -10,12 +10,15 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { agentTaduEnv } from "../extensions/lib/tadu-actor.ts";
 import { taduRoot } from "../extensions/lib/tadu.ts";
 
 export type TaduRunner = (args: string[]) => { status: number | null; stdout: string; stderr: string };
 
 const defaultRunner: TaduRunner = (args) => {
-	const r = spawnSync("tadu", args, { cwd: taduRoot(), encoding: "utf8", timeout: 5000 });
+	// Stamp the agent actor so the watch loop never mistakes the pool's own lane
+	// moves / decision comments for human control input (echo-loop guard).
+	const r = spawnSync("tadu", args, { cwd: taduRoot(), encoding: "utf8", timeout: 5000, env: agentTaduEnv() });
 	return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 };
 

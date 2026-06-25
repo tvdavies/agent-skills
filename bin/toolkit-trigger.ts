@@ -26,6 +26,7 @@ import {
 import { stateDir } from "../extensions/lib/decisions.ts";
 import { buildDrivePrPrompt } from "../extensions/lib/drive-pr.ts";
 import { writeAnswer } from "../extensions/lib/park.ts";
+import { agentTaduEnv } from "../extensions/lib/tadu-actor.ts";
 import { taduRoot, workspaceExists } from "../extensions/lib/tadu.ts";
 
 const repoDir = join(import.meta.dirname, "..");
@@ -68,6 +69,10 @@ function createTaduTask(text: string, source?: string): string | undefined {
 			cwd: taduRoot(),
 			encoding: "utf8",
 			timeout: 5000,
+			// A trigger is system-originated (cron / Slack / webhook / CLI), not a human
+			// dragging a card — stamp the agent actor so the watch loop does not
+			// re-handle it as control input on top of the inbox drain.
+			env: agentTaduEnv(),
 		});
 		if (result.status !== 0) return undefined;
 		const id = result.stdout.trim().split(/\s+/)[0];
