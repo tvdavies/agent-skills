@@ -38,10 +38,12 @@ import {
 	renderLauncher,
 	renderSystemdUnit,
 } from "../daemon/provision.ts";
+import { classifyTrigger } from "../daemon/route.ts";
 import { RpcClient } from "../daemon/rpc-client.ts";
 import { SlackBridge } from "../daemon/slack.ts";
 import { Supervisor } from "../daemon/supervisor.ts";
 import { WebhookServer } from "../daemon/webhook-server.ts";
+import { WorkerPool } from "../daemon/worker-pool.ts";
 
 function csv(value: string | undefined): string[] {
 	return (value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -196,6 +198,25 @@ function runDaemon(): void {
 	const runsPath = join(state, "runs-state.json");
 	let runsState: RunsState = (readJson(runsPath) as RunsState | null) ?? INITIAL_RUNS_STATE;
 
+	// Worker fleet: discrete tracked work is delegated to a bounded pool of
+	// `pi -p` worker sessions so the resident orchestrator never blocks on a long
+	// task and independent tasks run concurrently. Workers write their sessions to
+	// a separate dir (so --continue never picks one up; the dashboard reads both).
+	const workerSessionsDir = join(state, "worker-sessions");
+	const workerPool = new WorkerPool({
+		maxConcurrent: Number(process.env.AGENT_TOOLKIT_WORKER_CONCURRENCY ?? 2),
+		sessionDir: workerSessionsDir,
+		cwd: process.env.AGENT_TOOLKIT_WORKER_CWD ?? repoDir,
+		piBin,
+		model,
+		timeoutMs: Number(process.env.AGENT_TOOLKIT_WORKER_TIMEOUT_MS ?? 15 * 60_000),
+		onDecision: (d) => recordDecision({ kind: d.kind, summary: d.summary, source: d.source ?? "worker", detail: d.detail }),
+		onEscalate: (summary) => {
+			notify({ summary, kind: "escalate", source: "worker" });
+		},
+		logger: (m) => console.error(m),
+	});
+
 	const supervisor = new Supervisor({
 		instance,
 		statusPath,
@@ -204,6 +225,8 @@ function runDaemon(): void {
 			currentClient = new RpcClient({ command: piBin, args: piArgs, cwd: repoDir, logger: (m) => console.error(m) });
 			return currentClient;
 		},
+		delegate: (trigger) => classifyTrigger(trigger) === "worker",
+		dispatchWorker: (trigger) => workerPool.dispatch(trigger),
 		onForward: (trigger) => {
 			recordDecision({
 				kind: "trigger",
@@ -306,6 +329,8 @@ function runDaemon(): void {
 		enqueue: (text) => inbox.append({ text, source: "dashboard" }),
 		statusPath,
 		sessionsDir: sessionDir,
+		workerSessionsDir,
+		workerStats: () => ({ active: workerPool.activeCount(), queued: workerPool.queuedCount() }),
 		cronJobs: () =>
 			new CronJobStore().list().map((j) => {
 				// The heartbeat's real cadence is the systemd timer period gated by the
@@ -332,7 +357,7 @@ function runDaemon(): void {
 	dashboard.start().catch((e) => console.error(`[dashboard] failed to start: ${e}`));
 
 	console.error(
-		`[toolkit-daemon] started (instance=${instance}, slack=${slack ? "on" : "off"}, webhook=${webhook ? "on" : "off"}, dashboard=on, spendCap=${dailyCapUsd > 0 ? `$${dailyCapUsd}` : "off"}, runsCap=${maxRunsPerDay > 0 ? maxRunsPerDay : "off"})`,
+		`[toolkit-daemon] started (instance=${instance}, slack=${slack ? "on" : "off"}, webhook=${webhook ? "on" : "off"}, dashboard=on, workers=${Number(process.env.AGENT_TOOLKIT_WORKER_CONCURRENCY ?? 2)}, spendCap=${dailyCapUsd > 0 ? `$${dailyCapUsd}` : "off"}, runsCap=${maxRunsPerDay > 0 ? maxRunsPerDay : "off"})`,
 	);
 
 	let shuttingDown = false;
@@ -345,6 +370,7 @@ function runDaemon(): void {
 		clearTimeout(initialStateTimer);
 		notifyWatcher?.stop();
 		await dashboard.stop();
+		await workerPool.stop();
 		await supervisor.stop();
 		slack?.stop();
 		await webhook?.stop();

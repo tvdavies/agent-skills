@@ -76,6 +76,42 @@ describe("Supervisor (unit, fake client + injected timers)", () => {
 		expect(existsSync(join(dir, "status.json"))).toBe(true);
 	});
 
+	it("delegates a worker-routed trigger to the pool, not the resident", () => {
+		let pending: Trigger[] = [
+			{ id: "1", text: "resident please", source: "cli" },
+			{ id: "2", text: "work item", source: "cli", taduTask: "TASK-1" },
+		];
+		const clients: FakeClient[] = [];
+		const dispatched: Trigger[] = [];
+		const forwarded: Trigger[] = [];
+		const sup = new Supervisor({
+			createClient: () => {
+				const c = new FakeClient();
+				clients.push(c);
+				return c as unknown as RpcClient;
+			},
+			inbox: {
+				drain() {
+					const t = pending;
+					pending = [];
+					return t;
+				},
+			},
+			statusPath: join(dir, "status.json"),
+			pollMs: 0,
+			statusMs: 0,
+			now: () => 1000,
+			onForward: (t) => forwarded.push(t),
+			delegate: (t) => Boolean(t.taduTask),
+			dispatchWorker: (t) => dispatched.push(t),
+		});
+		sup.start();
+		sup.pollInbox();
+		expect(clients[0]?.submitted).toEqual(["resident please"]); // resident only
+		expect(dispatched.map((t) => t.id)).toEqual(["2"]); // work item delegated
+		expect(forwarded.map((t) => t.id)).toEqual(["1"]); // onForward only for the resident path
+	});
+
 	it("pairs a slack-origin trigger with the next agent_end and replies", () => {
 		let pending: Trigger[] = [
 			{ id: "1", text: "hello", origin: { kind: "slack", channel: "C1", threadTs: "t1", user: "U" } },

@@ -55,6 +55,10 @@ export type SupervisorOptions = {
 	onReply?: (origin: TriggerOrigin, text: string) => void;
 	/** When it returns true, forwarding is paused (e.g. the daily spend cap). */
 	gate?: () => boolean;
+	/** Predicate: when true, a trigger is delegated to a worker, not the resident. */
+	delegate?: (trigger: Trigger) => boolean;
+	/** Hand a trigger to the worker pool (used when `delegate` returns true). */
+	dispatchWorker?: (trigger: Trigger) => void;
 	/** A run longer than this (ms) resets the restart backoff. */
 	stableResetMs?: number;
 };
@@ -63,9 +67,9 @@ type LastTrigger = { text: string; source?: string; at: string };
 
 export class Supervisor {
 	private readonly o: Required<
-		Omit<SupervisorOptions, "onForward" | "instance" | "onReply" | "gate">
+		Omit<SupervisorOptions, "onForward" | "instance" | "onReply" | "gate" | "delegate" | "dispatchWorker">
 	> &
-		Pick<SupervisorOptions, "onForward" | "instance" | "onReply" | "gate">;
+		Pick<SupervisorOptions, "onForward" | "instance" | "onReply" | "gate" | "delegate" | "dispatchWorker">;
 	private client: RpcClient | undefined;
 	private readonly pendingOrigins: TriggerOrigin[] = [];
 	private stopping = false;
@@ -91,6 +95,8 @@ export class Supervisor {
 			onForward: options.onForward,
 			onReply: options.onReply,
 			gate: options.gate,
+			delegate: options.delegate,
+			dispatchWorker: options.dispatchWorker,
 			instance: options.instance,
 		};
 	}
@@ -125,13 +131,17 @@ export class Supervisor {
 		const fresh = this.o.inbox.drain();
 		if (fresh.length === 0) return;
 		for (const trigger of fresh) {
+			const at = trigger.ts ?? new Date(this.o.now()).toISOString();
+			// Discrete tracked work is delegated to a worker so the resident stays
+			// free; everything else runs on the resident orchestrator.
+			if (this.o.dispatchWorker && this.o.delegate?.(trigger)) {
+				this.o.dispatchWorker(trigger);
+				this.lastTrigger = { text: trigger.text, source: trigger.source, at };
+				continue;
+			}
 			this.client?.submit(trigger.text);
 			if (trigger.origin) this.pendingOrigins.push(trigger.origin);
-			this.lastTrigger = {
-				text: trigger.text,
-				source: trigger.source,
-				at: trigger.ts ?? new Date(this.o.now()).toISOString(),
-			};
+			this.lastTrigger = { text: trigger.text, source: trigger.source, at };
 			this.o.onForward?.(trigger);
 		}
 		this.writeStatus();

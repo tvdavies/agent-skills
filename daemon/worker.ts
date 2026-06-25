@@ -1,0 +1,141 @@
+/**
+ * Worker — run one discrete task as its own `pi -p` (non-interactive) session.
+ *
+ * A worker is a short-lived subprocess: it processes a single prompt to
+ * completion, persists its session JSONL (so it shows in the dashboard), then
+ * exits. This is the unit the fleet delegates to so coding/long work never
+ * blocks the resident orchestrator, and so every task can run concurrently.
+ *
+ * Workers run with `--no-extensions` for predictable one-shot behaviour (no
+ * orchestrator-only loops like goal continuation); built-in tools stay enabled.
+ * The spawn is injectable so the lifecycle (capture, exit, timeout) is tested
+ * without pi.
+ */
+
+import { type ChildProcess, spawn as nodeSpawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
+
+export type WorkerSpec = {
+	/** Stable run id (also the session/log label). */
+	id: string;
+	/** TADU task this run advances, when delegated work. */
+	taskId?: string;
+	/** The prompt the worker processes. */
+	prompt: string;
+	/** Directory pi writes the worker's session JSONL into. */
+	sessionDir: string;
+	/** Working directory for the run. */
+	cwd: string;
+	/** Absolute path to the pi binary. */
+	piBin: string;
+	/** Model override (provider/id), as the resident uses. */
+	model?: string;
+	/** Hard timeout; the worker is killed past it. Default 15 min. */
+	timeoutMs?: number;
+};
+
+export type WorkerResult = {
+	id: string;
+	taskId?: string;
+	ok: boolean;
+	code: number | null;
+	signal: NodeJS.Signals | null;
+	/** Trimmed stdout — the final assistant text in pi's `-p` text mode. */
+	outputText: string;
+	/** Tail of stderr, for diagnosing a failure. */
+	errorText: string;
+	timedOut: boolean;
+};
+
+export type SpawnFn = typeof nodeSpawn;
+
+export type WorkerHandle = {
+	id: string;
+	kill: () => void;
+	done: Promise<WorkerResult>;
+};
+
+const DEFAULT_TIMEOUT_MS = 15 * 60_000;
+const MAX_CAPTURE = 64 * 1024; // cap captured output so a chatty run can't grow unbounded
+
+/** Build the pi argument vector for a worker run. */
+export function workerArgs(spec: WorkerSpec): string[] {
+	const args = ["-p", "--no-extensions", "--session-dir", spec.sessionDir];
+	if (spec.model) args.push("--model", spec.model);
+	args.push(spec.prompt);
+	return args;
+}
+
+/** Spawn a worker subprocess. `spawn` is injected for tests. */
+export function runWorker(spec: WorkerSpec, spawn: SpawnFn = nodeSpawn): WorkerHandle {
+	try {
+		mkdirSync(spec.sessionDir, { recursive: true });
+	} catch {
+		// best-effort; pi will surface a clearer error if the dir is unusable
+	}
+
+	const child: ChildProcess = spawn(spec.piBin, workerArgs(spec), {
+		cwd: spec.cwd,
+		stdio: ["ignore", "pipe", "pipe"],
+		env: process.env,
+		// Own process group, so a timeout/stop kills the worker AND any tool
+		// subprocesses it spawned (otherwise a grandchild can hold the output pipe
+		// open and `close` never fires).
+		detached: true,
+	});
+
+	// Signal the whole group; fall back to the child alone if the group is gone.
+	const killGroup = (signal: NodeJS.Signals): void => {
+		try {
+			if (typeof child.pid === "number") process.kill(-child.pid, signal);
+			else child.kill(signal);
+		} catch {
+			try {
+				child.kill(signal);
+			} catch {
+				// already exited
+			}
+		}
+	};
+
+	let out = "";
+	let err = "";
+	let timedOut = false;
+	let hardKillTimer: ReturnType<typeof setTimeout> | undefined;
+	child.stdout?.on("data", (chunk: Buffer) => {
+		if (out.length < MAX_CAPTURE) out += chunk.toString("utf8");
+	});
+	child.stderr?.on("data", (chunk: Buffer) => {
+		if (err.length < MAX_CAPTURE) err += chunk.toString("utf8");
+	});
+
+	const timer = setTimeout(() => {
+		timedOut = true;
+		killGroup("SIGTERM");
+		hardKillTimer = setTimeout(() => killGroup("SIGKILL"), 3000);
+	}, spec.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+	const done = new Promise<WorkerResult>((resolve) => {
+		const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+			clearTimeout(timer);
+			if (hardKillTimer) clearTimeout(hardKillTimer);
+			resolve({
+				id: spec.id,
+				taskId: spec.taskId,
+				ok: !timedOut && code === 0,
+				code,
+				signal,
+				outputText: out.trim(),
+				errorText: err.trim().slice(-2000),
+				timedOut,
+			});
+		};
+		child.on("error", (e) => {
+			err += `${err ? "\n" : ""}${(e as Error).message}`;
+			finish(null, null);
+		});
+		child.on("close", (code, signal) => finish(code, signal));
+	});
+
+	return { id: spec.id, kill: () => killGroup("SIGTERM"), done };
+}

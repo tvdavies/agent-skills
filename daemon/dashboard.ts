@@ -28,6 +28,10 @@ export type DashboardOptions = {
 	cronJobs?: () => Array<{ id: string; schedule: string; description?: string }>;
 	/** pi session directory, parsed into episodes for the Sessions tab. */
 	sessionsDir?: string;
+	/** Worker session directory; its episodes are tagged "worker". */
+	workerSessionsDir?: string;
+	/** Live worker-pool counts for the overview. */
+	workerStats?: () => { active: number; queued: number };
 	token?: string;
 	host?: string;
 	port?: number;
@@ -97,6 +101,7 @@ export class Dashboard {
 					return this.json(res, 200, {
 						status: readJson(this.o.statusPath),
 						counts: { decisions: countDecisions(), notices: readNotices({ unackedOnly: true }).length },
+						workers: this.o.workerStats?.() ?? { active: 0, queued: 0 },
 					});
 				case "/api/decisions":
 					return this.json(res, 200, { decisions: readRecent(Number(url.searchParams.get("limit") ?? 50)) });
@@ -159,23 +164,35 @@ export class Dashboard {
 		res.on("close", () => clearInterval(timer));
 	}
 
+	/** Session directories to scan, with an optional source tag (resident + workers). */
+	private episodeSources(): Array<{ dir: string; tag?: string }> {
+		const sources: Array<{ dir: string; tag?: string }> = [];
+		if (this.o.sessionsDir) sources.push({ dir: this.o.sessionsDir });
+		if (this.o.workerSessionsDir) sources.push({ dir: this.o.workerSessionsDir, tag: "worker" });
+		return sources;
+	}
+
 	private listEpisodes(limit: number): ReturnType<typeof episodeSummary>[] {
-		const dir = this.o.sessionsDir;
-		if (!dir || !existsSync(dir)) return [];
 		const out: ReturnType<typeof episodeSummary>[] = [];
-		let files: string[] = [];
-		try {
-			files = readdirSync(dir);
-		} catch {
-			return [];
-		}
-		for (const file of files) {
-			if (!file.endsWith(".jsonl")) continue;
+		for (const { dir, tag } of this.episodeSources()) {
+			if (!existsSync(dir)) continue;
+			let files: string[] = [];
 			try {
-				const eps = parseEpisodesFromJsonl(readFileSync(join(dir, file), "utf8"), file.replace(/\.jsonl$/, ""));
-				for (const ep of eps) out.push(episodeSummary(ep));
+				files = readdirSync(dir);
 			} catch {
-				// skip a corrupt session file
+				continue;
+			}
+			for (const file of files) {
+				if (!file.endsWith(".jsonl")) continue;
+				try {
+					const eps = parseEpisodesFromJsonl(readFileSync(join(dir, file), "utf8"), file.replace(/\.jsonl$/, ""));
+					for (const ep of eps) {
+						const summary = episodeSummary(ep);
+						out.push(tag ? { ...summary, source: tag } : summary);
+					}
+				} catch {
+					// skip a corrupt session file
+				}
 			}
 		}
 		return out
@@ -184,16 +201,19 @@ export class Dashboard {
 	}
 
 	private getEpisode(id: string): Episode | undefined {
-		const dir = this.o.sessionsDir;
 		const sessionId = id.split("#")[0];
-		if (!dir || !sessionId) return undefined;
-		const file = join(dir, `${sessionId}.jsonl`);
-		if (!existsSync(file)) return undefined;
-		try {
-			return parseEpisodesFromJsonl(readFileSync(file, "utf8"), sessionId).find((e) => e.id === id);
-		} catch {
-			return undefined;
+		if (!sessionId) return undefined;
+		for (const { dir, tag } of this.episodeSources()) {
+			const file = join(dir, `${sessionId}.jsonl`);
+			if (!existsSync(file)) continue;
+			try {
+				const ep = parseEpisodesFromJsonl(readFileSync(file, "utf8"), sessionId).find((e) => e.id === id);
+				if (ep) return tag ? { ...ep, source: tag } : ep;
+			} catch {
+				// try the next source
+			}
 		}
+		return undefined;
 	}
 
 	private json(res: ServerResponse, status: number, body: unknown): void {
@@ -254,6 +274,7 @@ const HTML = `<!doctype html>
   .list .item:hover { background: #161922; } .list .item.sel { background: #1a1d26; }
   .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 10px; background: #232733; color: #8b93a7; }
   .badge.hb { background: #2d2540; color: #c0a4f7; } .badge.err { background: #3a1f29; color: #f7768e; }
+  .badge.wk { background: #16302a; color: #9ece6a; }
   pre { white-space: pre-wrap; word-break: break-word; margin: 4px 0; background: #0c0e13; border: 1px solid #1a1d26; border-radius: 6px; padding: 8px; max-height: 320px; overflow: auto; }
   details { margin: 4px 0; } summary { cursor: pointer; color: #8b93a7; }
   .turn { border-left: 2px solid #232733; padding-left: 10px; margin: 8px 0; }
@@ -289,7 +310,7 @@ const HTML = `<!doctype html>
     <section>
       <h2>Sessions / episodes
         <select id="src" onchange="loadEpisodes()" style="margin-left:8px">
-          <option value="">all sources</option><option value="heartbeat">heartbeat</option><option value="session">session</option>
+          <option value="">all sources</option><option value="heartbeat">heartbeat</option><option value="session">session</option><option value="worker">worker</option>
         </select>
         <span class="link" onclick="loadEpisodes()" style="margin-left:8px">↻</span>
       </h2>
@@ -330,7 +351,8 @@ function row(html, cls){ var d=document.createElement("div"); d.className="row "
 function refresh(){
   api("/api/status").then(function(s){
     var st=s.status||{};
-    document.getElementById("status").textContent=(st.healthy?"● running":"○ down")+" · "+s.counts.decisions+" decisions · "+s.counts.notices+" unacked";
+    var w=s.workers||{active:0,queued:0};
+    document.getElementById("status").textContent=(st.healthy?"● running":"○ down")+" · "+w.active+" workers/"+w.queued+" queued · "+s.counts.decisions+" decisions · "+s.counts.notices+" unacked";
   }).catch(function(){ document.getElementById("status").textContent="error"; });
   api("/api/notices").then(function(n){
     var nb=document.getElementById("notices"); nb.innerHTML="";
@@ -356,7 +378,7 @@ function addDecision(d){
 }
 
 // ---- Sessions ----
-function srcBadge(s){ return "<span class='badge "+(s==="heartbeat"?"hb":"")+"'>"+esc(s)+"</span>"; }
+function srcBadge(s){ var c=s==="heartbeat"?"hb":(s==="worker"?"wk":""); return "<span class='badge "+c+"'>"+esc(s)+"</span>"; }
 function loadEpisodes(){
   var src=document.getElementById("src").value;
   api("/api/episodes?limit=200").then(function(r){
