@@ -12,7 +12,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { countDecisions, readRecent } from "../extensions/lib/decisions.ts";
 import { type Episode, episodeSummary, parseEpisodesFromJsonl } from "../extensions/lib/episodes.ts";
@@ -164,28 +164,49 @@ export class Dashboard {
 		res.on("close", () => clearInterval(timer));
 	}
 
-	/** Session directories to scan, with an optional source tag (resident + workers). */
-	private episodeSources(): Array<{ dir: string; tag?: string }> {
-		const sources: Array<{ dir: string; tag?: string }> = [];
+	/** Session directories to scan, with a tag and whether sessions are nested in
+	 *  per-run subdirs (workers) vs flat files (the resident). */
+	private episodeSources(): Array<{ dir: string; tag?: string; nested?: boolean }> {
+		const sources: Array<{ dir: string; tag?: string; nested?: boolean }> = [];
 		if (this.o.sessionsDir) sources.push({ dir: this.o.sessionsDir });
-		if (this.o.workerSessionsDir) sources.push({ dir: this.o.workerSessionsDir, tag: "worker" });
+		if (this.o.workerSessionsDir) sources.push({ dir: this.o.workerSessionsDir, tag: "worker", nested: true });
 		return sources;
+	}
+
+	/** Resolve a session dir to (file, sessionId) pairs. Worker dirs are nested one
+	 *  level (per-run subdir = the run id, which is also the session id). */
+	private sessionFiles(dir: string, nested?: boolean): Array<{ file: string; sessionId: string }> {
+		const out: Array<{ file: string; sessionId: string }> = [];
+		let entries: string[] = [];
+		try {
+			entries = readdirSync(dir);
+		} catch {
+			return out;
+		}
+		if (!nested) {
+			for (const f of entries) if (f.endsWith(".jsonl")) out.push({ file: join(dir, f), sessionId: f.replace(/\.jsonl$/, "") });
+			return out;
+		}
+		for (const sub of entries) {
+			const subdir = join(dir, sub);
+			try {
+				if (!statSync(subdir).isDirectory()) continue;
+				const jsonl = readdirSync(subdir).find((f) => f.endsWith(".jsonl"));
+				if (jsonl) out.push({ file: join(subdir, jsonl), sessionId: sub });
+			} catch {
+				// skip an unreadable run dir
+			}
+		}
+		return out;
 	}
 
 	private listEpisodes(limit: number): ReturnType<typeof episodeSummary>[] {
 		const out: ReturnType<typeof episodeSummary>[] = [];
-		for (const { dir, tag } of this.episodeSources()) {
+		for (const { dir, tag, nested } of this.episodeSources()) {
 			if (!existsSync(dir)) continue;
-			let files: string[] = [];
-			try {
-				files = readdirSync(dir);
-			} catch {
-				continue;
-			}
-			for (const file of files) {
-				if (!file.endsWith(".jsonl")) continue;
+			for (const { file, sessionId } of this.sessionFiles(dir, nested)) {
 				try {
-					const eps = parseEpisodesFromJsonl(readFileSync(join(dir, file), "utf8"), file.replace(/\.jsonl$/, ""));
+					const eps = parseEpisodesFromJsonl(readFileSync(file, "utf8"), sessionId);
 					for (const ep of eps) {
 						const summary = episodeSummary(ep);
 						out.push(tag ? { ...summary, source: tag } : summary);
@@ -203,11 +224,12 @@ export class Dashboard {
 	private getEpisode(id: string): Episode | undefined {
 		const sessionId = id.split("#")[0];
 		if (!sessionId) return undefined;
-		for (const { dir, tag } of this.episodeSources()) {
-			const file = join(dir, `${sessionId}.jsonl`);
-			if (!existsSync(file)) continue;
+		for (const { dir, tag, nested } of this.episodeSources()) {
+			if (!existsSync(dir)) continue;
+			const match = this.sessionFiles(dir, nested).find((s) => s.sessionId === sessionId);
+			if (!match) continue;
 			try {
-				const ep = parseEpisodesFromJsonl(readFileSync(file, "utf8"), sessionId).find((e) => e.id === id);
+				const ep = parseEpisodesFromJsonl(readFileSync(match.file, "utf8"), sessionId).find((e) => e.id === id);
 				if (ep) return tag ? { ...ep, source: tag } : ep;
 			} catch {
 				// try the next source

@@ -53,6 +53,13 @@ describe("workerArgs", () => {
 		const loaded = args.flatMap((a, i) => (a === "-e" ? [args[i + 1]] : []));
 		expect(loaded).toEqual(["/g.ts", "/wt.ts", "/x.ts"]);
 	});
+
+	it("adds --continue when resuming a session", () => {
+		expect(workerArgs(spec({})).includes("--continue")).toBe(false);
+		const resumed = workerArgs(spec({ resume: true }));
+		expect(resumed[0]).toBe("-p");
+		expect(resumed[1]).toBe("--continue");
+	});
 });
 
 describe("workerEnv", () => {

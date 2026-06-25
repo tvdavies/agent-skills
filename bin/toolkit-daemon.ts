@@ -232,12 +232,15 @@ function runDaemon(): void {
 		cwd: process.env.AGENT_TOOLKIT_WORKER_CWD ?? repoDir,
 		piBin,
 		model,
-		// Workers run --no-extensions; re-load just the guardrails safety floor
-		// plus the slim worktree tools so a worker can manage its own worktrees
-		// (adopt a PR branch, work across repos) when its task needs more than the
-		// deterministic per-worker worktree.
+		stateDir: state,
+		// Workers run --no-extensions; re-load just the guardrails safety floor,
+		// the slim worktree tools (adopt a PR branch, work across repos), and the
+		// park tool (wait for CI/review and resume this same session later).
 		guardrailsPath,
-		toolExtensions: [join(repoDir, "extensions", "worktree-tools.ts")],
+		toolExtensions: [
+			join(repoDir, "extensions", "worktree-tools.ts"),
+			join(repoDir, "extensions", "park.ts"),
+		],
 		// Each worker gets its own git worktree (branch worker/<id>) so concurrent
 		// workers never collide or dirty the shared checkout.
 		worktree: isolateWorkers ? (baseCwd, id) => prepareWorktree(baseCwd, id, workerTreesDir) : undefined,
@@ -275,13 +278,18 @@ function runDaemon(): void {
 		gate: () => spendPaused || runsPaused,
 	});
 
+	// Re-arm parked sessions persisted by a previous daemon (waiting on CI/review),
+	// so they resume on schedule rather than being treated as orphans.
+	workerPool.loadParked();
+
 	// Reconcile orphaned work: any task still in-progress at boot had its worker
-	// killed with the previous daemon (the pool's active set is in-memory only).
-	// Move it to blocked and log it so it is not an invisible zombie on the board.
+	// killed with the previous daemon (the pool's active set is in-memory only) —
+	// EXCEPT tasks whose session is parked (legitimately dormant, re-armed above).
 	try {
 		const control = taduControl();
+		const parked = workerPool.parkedTaskIds();
 		for (const task of listTasks()) {
-			if (task.status !== "in-progress") continue;
+			if (task.status !== "in-progress" || parked.has(task.id)) continue;
 			control.move(task.id, "blocked");
 			control.comment(task.id, "Worker did not finish (daemon restarted); moved to blocked for review.");
 			recordDecision({

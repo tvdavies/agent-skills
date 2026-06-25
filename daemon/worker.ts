@@ -35,6 +35,8 @@ export type WorkerSpec = {
 	guardrailsPath?: string;
 	/** Extra capability extensions to load (e.g. the slim worktree tools). */
 	toolExtensions?: string[];
+	/** Resume an existing session in sessionDir (--continue) instead of a fresh one. */
+	resume?: boolean;
 	/** Hard timeout; the worker is killed past it. Default 15 min. */
 	timeoutMs?: number;
 };
@@ -65,7 +67,10 @@ const MAX_CAPTURE = 64 * 1024; // cap captured output so a chatty run can't grow
 
 /** Build the pi argument vector for a worker run. */
 export function workerArgs(spec: WorkerSpec): string[] {
-	const args = ["-p", "--no-extensions", "--session-dir", spec.sessionDir];
+	const args = ["-p"];
+	// Resume the same per-run session (full context) instead of starting fresh.
+	if (spec.resume) args.push("--continue");
+	args.push("--no-extensions", "--session-dir", spec.sessionDir);
 	// Re-enable just the safety floor + chosen capabilities (an explicit -e
 	// survives --no-extensions).
 	if (spec.guardrailsPath) args.push("-e", spec.guardrailsPath);
@@ -88,8 +93,9 @@ export function runWorker(spec: WorkerSpec, spawn: SpawnFn = nodeSpawn): WorkerH
 		stdio: ["ignore", "pipe", "pipe"],
 		// Curated env: a worker has no business holding the daemon's Slack/webhook
 		// secrets or the dashboard token. Provider keys + PATH/HOME (where pi keeps
-		// its auth) are kept so the run still works.
-		env: workerEnv(),
+		// its auth) are kept so the run still works. The run id lets the park tool
+		// record which session to resume.
+		env: { ...workerEnv(), AGENT_TOOLKIT_WORKER_RUN_ID: spec.id },
 		// Own process group, so a timeout/stop kills the worker AND any tool
 		// subprocesses it spawned (otherwise a grandchild can hold the output pipe
 		// open and `close` never fires).

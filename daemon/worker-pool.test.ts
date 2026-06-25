@@ -1,7 +1,11 @@
-import { beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { writeParkRequest } from "../extensions/lib/park";
 import type { Trigger } from "./inbox";
 import type { TaduControl } from "./tadu-control";
-import { type PoolDecision, WorkerPool, type WorkerRunner } from "./worker-pool";
+import { type PoolDecision, type WorkerPoolOptions, WorkerPool, type WorkerRunner } from "./worker-pool";
 import type { WorkerResult, WorkerSpec } from "./worker";
 
 // Flush the microtask chain (resolve → then(finish) → finally(pump)).
@@ -14,6 +18,8 @@ let comments: Array<[string, string]>;
 let decisions: PoolDecision[];
 let escalations: string[];
 let ids: number;
+let stateDir: string;
+let clock: number;
 
 const runner: WorkerRunner = (spec) => {
 	let resolve!: (r: WorkerResult) => void;
@@ -36,17 +42,21 @@ const failResult = (spec: WorkerSpec, code = 1): WorkerResult => ({
 });
 const trig = (taskId?: string): Trigger => ({ id: `t-${taskId ?? "x"}`, text: `work ${taskId ?? ""}`.trim(), taduTask: taskId });
 
-function pool(maxConcurrent: number): WorkerPool {
+function pool(maxConcurrent: number, extra: Partial<WorkerPoolOptions> = {}): WorkerPool {
 	return new WorkerPool({
 		maxConcurrent,
 		sessionDir: "/tmp/sessions",
 		cwd: "/tmp/cwd",
 		piBin: "pi",
+		stateDir,
 		runner,
 		tadu,
 		newId: () => `w${++ids}`,
+		now: () => clock,
+		parkPollMs: 0, // tests drive checkParked() manually
 		onDecision: (d) => decisions.push(d),
 		onEscalate: (s) => escalations.push(s),
+		...extra,
 	});
 }
 
@@ -57,7 +67,10 @@ beforeEach(() => {
 	decisions = [];
 	escalations = [];
 	ids = 0;
+	clock = 1_000_000;
+	stateDir = mkdtempSync(join(tmpdir(), "pool-"));
 });
+afterEach(() => rmSync(stateDir, { recursive: true, force: true }));
 
 describe("WorkerPool", () => {
 	it("runs up to maxConcurrent and queues the rest", async () => {
@@ -126,18 +139,7 @@ describe("WorkerPool", () => {
 	});
 
 	it("drops and escalates when the queue is full", () => {
-		const p = new WorkerPool({
-			maxConcurrent: 1,
-			maxQueue: 1,
-			sessionDir: "/tmp/s",
-			cwd: "/tmp/c",
-			piBin: "pi",
-			runner,
-			tadu,
-			newId: () => `w${++ids}`,
-			onDecision: (d) => decisions.push(d),
-			onEscalate: (s) => escalations.push(s),
-		});
+		const p = pool(1, { maxQueue: 1 });
 		p.dispatch(trig("TASK-1")); // active
 		p.dispatch(trig("TASK-2")); // queued (fills the queue)
 		p.dispatch(trig("TASK-3")); // dropped
@@ -147,16 +149,7 @@ describe("WorkerPool", () => {
 	});
 
 	it("stop() resolves even if a worker never closes", async () => {
-		const p = new WorkerPool({
-			maxConcurrent: 1,
-			stopTimeoutMs: 50,
-			sessionDir: "/tmp/s",
-			cwd: "/tmp/c",
-			piBin: "pi",
-			runner, // its done never resolves unless we resolve it
-			tadu,
-			newId: () => `w${++ids}`,
-		});
+		const p = pool(1, { stopTimeoutMs: 50 }); // runner's done never resolves unless we do
 		p.dispatch(trig("TASK-1"));
 		await p.stop(); // must not hang despite the unresolved worker
 		expect(pendings[0]?.killed).toBe(true);
@@ -182,17 +175,7 @@ describe("WorkerPool", () => {
 				return { isolated: true, changed: true, removed: false, path: `/trees/${id}`, branch: `worker/${id}` };
 			},
 		});
-		const p = new WorkerPool({
-			maxConcurrent: 1,
-			sessionDir: "/s",
-			cwd: "/base",
-			piBin: "pi",
-			runner,
-			tadu,
-			newId: () => "w1",
-			worktree: provider,
-			onDecision: (d) => decisions.push(d),
-		});
+		const p = pool(1, { sessionDir: "/s", cwd: "/base", newId: () => "w1", worktree: provider });
 		p.dispatch(trig("TASK-1"));
 		expect(pendings[0]?.spec.cwd).toBe("/trees/w1"); // ran in the worktree, not the base
 		pendings[0]?.resolve(okResult(pendings[0].spec));
@@ -209,9 +192,7 @@ describe("WorkerPool", () => {
 			path: `/trees/${id}`,
 			finalize: () => ({ isolated: true, changed: false, removed: true, path: `/trees/${id}`, branch: `worker/${id}` }),
 		});
-		const p = new WorkerPool({
-			maxConcurrent: 1, sessionDir: "/s", cwd: "/base", piBin: "pi", runner, tadu, newId: () => "w2", worktree: provider,
-		});
+		const p = pool(1, { sessionDir: "/s", cwd: "/base", newId: () => "w2", worktree: provider });
 		p.dispatch(trig("TASK-2"));
 		pendings[0]?.resolve(okResult(pendings[0].spec));
 		await flush();
@@ -231,5 +212,90 @@ describe("WorkerPool", () => {
 		expect(p.activeCount()).toBe(0);
 		expect(p.queuedCount()).toBe(0);
 		expect(pendings).toHaveLength(3);
+	});
+
+	it("parks a worker that requested a wait, frees the slot, then resumes the same session", async () => {
+		const p = pool(1);
+		p.dispatch(trig("TASK-1"));
+		const spec = pendings[0]?.spec as WorkerSpec;
+		// Worker requests a park before its turn ends.
+		writeParkRequest(stateDir, { runId: spec.id, dueAt: clock + 60_000, prompt: "re-check the PR", reason: "ci" });
+		pendings[0]?.resolve(okResult(spec));
+		await flush();
+
+		// Task is NOT finalised; the slot is free; the session is parked + in flight.
+		expect(moves).not.toContainEqual(["TASK-1", "in-review"]);
+		expect(p.activeCount()).toBe(0);
+		expect(p.parkedCount()).toBe(1);
+		expect(p.parkedTaskIds().has("TASK-1")).toBe(true);
+
+		// A duplicate dispatch while parked is coalesced.
+		p.dispatch(trig("TASK-1"));
+		expect(pendings).toHaveLength(1);
+
+		// Not due yet → no resume.
+		p.checkParked();
+		await flush();
+		expect(p.activeCount()).toBe(0);
+
+		// Advance the clock past the due time → resumes the SAME run id (same session).
+		clock += 61_000;
+		p.checkParked();
+		await flush();
+		expect(p.activeCount()).toBe(1);
+		expect(pendings).toHaveLength(2);
+		expect(pendings[1]?.spec.id).toBe(spec.id);
+		expect(pendings[1]?.spec.resume).toBe(true);
+		expect(pendings[1]?.spec.prompt).toBe("re-check the PR");
+
+		// Finish the resume terminally → task completes.
+		pendings[1]?.resolve(okResult(pendings[1].spec, "all green"));
+		await flush();
+		expect(moves).toContainEqual(["TASK-1", "in-review"]);
+		expect(p.parkedCount()).toBe(0);
+		expect(p.parkedTaskIds().has("TASK-1")).toBe(false);
+	});
+
+	it("re-arms parked sessions after a restart (loadParked)", async () => {
+		const p1 = pool(1);
+		p1.dispatch(trig("TASK-9"));
+		const spec = pendings[0]?.spec as WorkerSpec;
+		writeParkRequest(stateDir, { runId: spec.id, dueAt: clock + 1000, prompt: "go", reason: "ci" });
+		pendings[0]?.resolve(okResult(spec));
+		await flush();
+		expect(p1.parkedCount()).toBe(1);
+
+		// Simulate a restart: a fresh pool loads parked entries from disk.
+		const p2 = pool(1);
+		p2.loadParked();
+		expect(p2.parkedTaskIds().has("TASK-9")).toBe(true);
+		clock += 2000;
+		p2.checkParked();
+		await flush();
+		expect(pendings[1]?.spec.id).toBe(spec.id); // resumed the same run
+		expect(pendings[1]?.spec.resume).toBe(true);
+	});
+
+	it("ends a park loop that exceeds maxResumes", async () => {
+		const p = pool(1, { maxResumes: 1 });
+		p.dispatch(trig("TASK-5"));
+		let spec = pendings[0]?.spec as WorkerSpec;
+		writeParkRequest(stateDir, { runId: spec.id, dueAt: clock, prompt: "again", reason: "r" });
+		pendings[0]?.resolve(okResult(spec));
+		await flush();
+		expect(p.parkedCount()).toBe(1);
+
+		p.checkParked(); // due now → resume (cycle 1)
+		await flush();
+		expect(pendings).toHaveLength(2);
+		spec = pendings[1]?.spec as WorkerSpec;
+		writeParkRequest(stateDir, { runId: spec.id, dueAt: clock, prompt: "again", reason: "r" });
+		pendings[1]?.resolve(okResult(spec));
+		await flush();
+
+		// resumes(1) >= maxResumes(1) → terminal failure, not another park.
+		expect(moves).toContainEqual(["TASK-5", "blocked"]);
+		expect(escalations.some((s) => s.includes("TASK-5"))).toBe(true);
+		expect(p.parkedCount()).toBe(0);
 	});
 });
