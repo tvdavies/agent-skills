@@ -72,17 +72,19 @@ function inWindow(t: number, window: HoursWindow): boolean {
 		: t >= startMin || t < endMin; // overnight window
 }
 
+/** Whether the local time of `now` falls inside the window (handles overnight). */
+export function isInHoursWindow(now: Date, window: HoursWindow): boolean {
+	return inWindow(now.getHours() * 60 + now.getMinutes(), window);
+}
+
 /** Decide whether a heartbeat may run now. `now` is injected for testability. */
 export function shouldRunHeartbeat(
 	state: HeartbeatGateState,
 	config: HeartbeatGateConfig,
 	now: Date,
 ): GateVerdict {
-	if (config.activeHours) {
-		const minutesOfDay = now.getHours() * 60 + now.getMinutes();
-		if (!inWindow(minutesOfDay, config.activeHours)) {
-			return { run: false, reason: "quiet-hours" };
-		}
+	if (config.activeHours && !isInHoursWindow(now, config.activeHours)) {
+		return { run: false, reason: "quiet-hours" };
 	}
 	const intervalMs = config.minIntervalMin * 60_000;
 	// Apply a small grace so a tick that lands a hair under the interval (clock

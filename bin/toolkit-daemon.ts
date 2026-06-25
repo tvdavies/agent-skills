@@ -26,7 +26,7 @@ import { brainRoot } from "../extensions/lib/paths.ts";
 import { INITIAL_RUNS_STATE, recordRun, type RunsState } from "../extensions/lib/runs.ts";
 import { applyCumulativeCost, INITIAL_SPEND_STATE, type SpendState } from "../extensions/lib/spend.ts";
 import { ensureWorkspace, taduRoot } from "../extensions/lib/tadu.ts";
-import { resolveMinIntervalMinutes } from "../extensions/heartbeat/schedule-gate.ts";
+import { parseHoursWindow, resolveMinIntervalMinutes } from "../extensions/heartbeat/schedule-gate.ts";
 import { Dashboard } from "../daemon/dashboard.ts";
 import { checkEnvFileSecurity } from "../daemon/env-secure.ts";
 import { FileInbox } from "../daemon/inbox.ts";
@@ -293,6 +293,9 @@ function runDaemon(): void {
 			post: (text) => {
 				void bridge.postMessage(notifyChannel, text);
 			},
+			// Do-not-disturb: hold routine notices inside the window, flush as one
+			// morning batch; escalations still break through.
+			quietHours: parseHoursWindow(process.env.AGENT_TOOLKIT_QUIET_HOURS),
 			logger: (m) => console.error(m),
 		});
 		notifyWatcher.start();

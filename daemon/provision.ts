@@ -63,7 +63,8 @@ export function renderEnvFile(cfg: ProvisionConfig): string {
 		`# export AGENT_TOOLKIT_DAILY_CAP_USD=20             # per-token billing guard`,
 		`# export AGENT_TOOLKIT_MAX_RUNS_PER_DAY=200         # subscription guard (USD cap reads ~$0)`,
 		`# export AGENT_TOOLKIT_HEARTBEAT_MIN_MINUTES=30     # min minutes between heartbeats (auto 60 on subscription auth, else 30; set to override)`,
-		`# export AGENT_TOOLKIT_HEARTBEAT_HOURS=07:00-23:00  # only heartbeat in this window`,
+		`# export AGENT_TOOLKIT_QUIET_HOURS=23:00-07:00      # do-not-disturb: keep working, hold routine notices (batched at window end); escalations still break through`,
+		`# export AGENT_TOOLKIT_HEARTBEAT_HOURS=07:00-23:00  # pause: only run the heartbeat inside this window (leave unset to run 24/7)`,
 		``,
 	);
 	return lines.join("\n");
