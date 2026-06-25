@@ -42,6 +42,11 @@ describe("workerArgs", () => {
 		expect(args.slice(args.indexOf("--model"), args.indexOf("--model") + 2)).toEqual(["--model", "openai/gpt-5.5"]);
 		expect(args[args.length - 1]).toBe("do the task"); // prompt is last
 	});
+
+	it("loads the guardrails extension when a path is given", () => {
+		const args = workerArgs(spec({ guardrailsPath: "/repo/extensions/guardrails/index.ts" }));
+		expect(args.slice(args.indexOf("-e"), args.indexOf("-e") + 2)).toEqual(["-e", "/repo/extensions/guardrails/index.ts"]);
+	});
 });
 
 describe("workerEnv", () => {

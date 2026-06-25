@@ -15,8 +15,12 @@ import { randomUUID } from "node:crypto";
 import type { Trigger } from "./inbox.ts";
 import { taduControl, type TaduControl } from "./tadu-control.ts";
 import { runWorker, type WorkerHandle, type WorkerResult, type WorkerSpec } from "./worker.ts";
+import type { PreparedWorktree } from "./worktree.ts";
 
 export type WorkerRunner = (spec: WorkerSpec) => WorkerHandle;
+
+/** Prepare an isolated worktree for a run (the pool stays git-agnostic + testable). */
+export type WorktreeProvider = (baseCwd: string, id: string) => PreparedWorktree;
 
 export type PoolDecision = {
 	kind: string;
@@ -49,14 +53,17 @@ export type WorkerPoolOptions = {
 	onEscalate?: (summary: string) => void;
 	/** Run-id factory (injected in tests). */
 	newId?: () => string;
+	/** Absolute path to the guardrails extension, loaded into every worker. */
+	guardrailsPath?: string;
+	/** Isolate each worker in a git worktree; omit to run workers in the base cwd. */
+	worktree?: WorktreeProvider;
 	logger?: (message: string) => void;
 };
 
+type Optional = "model" | "timeoutMs" | "onDecision" | "onEscalate" | "logger" | "guardrailsPath" | "worktree";
+
 export class WorkerPool {
-	private readonly o: Required<
-		Omit<WorkerPoolOptions, "model" | "timeoutMs" | "onDecision" | "onEscalate" | "logger">
-	> &
-		Pick<WorkerPoolOptions, "model" | "timeoutMs" | "onDecision" | "onEscalate" | "logger">;
+	private readonly o: Required<Omit<WorkerPoolOptions, Optional>> & Pick<WorkerPoolOptions, Optional>;
 	private readonly queue: Trigger[] = [];
 	private readonly active = new Map<string, WorkerHandle>();
 	/** TADU tasks currently queued or running, so a task is never double-dispatched. */
@@ -79,6 +86,8 @@ export class WorkerPool {
 			stopTimeoutMs: options.stopTimeoutMs ?? 6000,
 			model: options.model,
 			timeoutMs: options.timeoutMs,
+			guardrailsPath: options.guardrailsPath,
+			worktree: options.worktree,
 			onDecision: options.onDecision,
 			onEscalate: options.onEscalate,
 			logger: options.logger,
@@ -137,19 +146,25 @@ export class WorkerPool {
 	private start(trigger: Trigger): void {
 		const id = this.o.newId();
 		const taskId = trigger.taduTask;
+		// Isolate the worker in its own worktree (deterministic, no LLM decision).
+		const prepared = this.o.worktree?.(this.o.cwd, id);
+		if (prepared?.error) {
+			this.o.logger?.(`[pool] worktree isolation failed for ${id}; running un-isolated: ${prepared.error}`);
+		}
 		const spec: WorkerSpec = {
 			id,
 			taskId,
 			prompt: composePrompt(trigger),
 			sessionDir: this.o.sessionDir,
-			cwd: this.o.cwd,
+			cwd: prepared?.cwd ?? this.o.cwd,
 			piBin: this.o.piBin,
 			model: this.o.model,
+			guardrailsPath: this.o.guardrailsPath,
 			timeoutMs: this.o.timeoutMs,
 		};
 		if (taskId) {
 			this.o.tadu.move(taskId, this.o.startStatus);
-			this.o.tadu.comment(taskId, `Worker ${id} started.`);
+			this.o.tadu.comment(taskId, `Worker ${id} started${prepared?.isolated ? ` in worktree ${prepared.path}` : ""}.`);
 		}
 		this.o.onDecision?.({
 			kind: "delegate",
@@ -162,18 +177,13 @@ export class WorkerPool {
 		const handle = this.o.runner(spec);
 		this.active.set(id, handle);
 		handle.done
-			.then((result) => this.finish(spec, result))
+			.then((result) => this.finish(spec, result, prepared))
 			.catch(() =>
-				this.finish(spec, {
-					id,
-					taskId,
-					ok: false,
-					code: null,
-					signal: null,
-					outputText: "",
-					errorText: "worker handle rejected",
-					timedOut: false,
-				}),
+				this.finish(
+					spec,
+					{ id, taskId, ok: false, code: null, signal: null, outputText: "", errorText: "worker handle rejected", timedOut: false },
+					prepared,
+				),
 			)
 			.finally(() => {
 				this.active.delete(id);
@@ -182,24 +192,27 @@ export class WorkerPool {
 			});
 	}
 
-	private finish(spec: WorkerSpec, result: WorkerResult): void {
+	private finish(spec: WorkerSpec, result: WorkerResult, prepared?: PreparedWorktree): void {
 		const taskId = spec.taskId;
+		// Tidy or preserve the worktree (preserved when it has changes to review).
+		const wt = prepared?.isolated ? prepared.finalize() : undefined;
+		const wtNote = wt?.changed ? `\n\nChanges left in worktree ${wt.path} (branch ${wt.branch}) for review.` : "";
 		if (result.ok) {
 			if (taskId) {
 				this.o.tadu.move(taskId, this.o.successStatus);
-				this.o.tadu.comment(taskId, `Worker ${spec.id} done.\n\n${result.outputText.slice(0, 1500) || "(no output)"}`);
+				this.o.tadu.comment(taskId, `Worker ${spec.id} done.\n\n${result.outputText.slice(0, 1500) || "(no output)"}${wtNote}`);
 			}
 			this.o.onDecision?.({
 				kind: "worker",
-				summary: `Worker ${spec.id} completed${taskId ? ` (${taskId})` : ""}.`,
-				detail: taskId ? { taduTask: taskId } : { worker: spec.id },
+				summary: `Worker ${spec.id} completed${taskId ? ` (${taskId})` : ""}${wt?.changed ? " — worktree preserved" : ""}.`,
+				detail: { ...(taskId ? { taduTask: taskId } : { worker: spec.id }), ...(wt?.changed ? { worktree: wt.path, branch: wt.branch } : {}) },
 			});
-			this.o.logger?.(`[pool] worker ${spec.id} completed`);
+			this.o.logger?.(`[pool] worker ${spec.id} completed${wt?.changed ? ` (worktree preserved: ${wt.path})` : ""}`);
 		} else {
 			const reason = result.timedOut ? "timed out" : `exit ${result.code ?? "?"}`;
 			if (taskId) {
 				this.o.tadu.move(taskId, this.o.failureStatus);
-				this.o.tadu.comment(taskId, `Worker ${spec.id} failed (${reason}).\n\n${result.errorText.slice(0, 1500)}`);
+				this.o.tadu.comment(taskId, `Worker ${spec.id} failed (${reason}).\n\n${result.errorText.slice(0, 1500)}${wtNote}`);
 			}
 			const summary = `Delegated task ${taskId ?? spec.id} failed (${reason}).`;
 			this.o.onDecision?.({ kind: "escalate", summary, detail: taskId ? { taduTask: taskId } : { worker: spec.id } });

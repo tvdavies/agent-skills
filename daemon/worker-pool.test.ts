@@ -170,6 +170,54 @@ describe("WorkerPool", () => {
 		expect(pendings).toHaveLength(0);
 	});
 
+	it("runs the worker in an isolated worktree and preserves it when changed", async () => {
+		const finalized: string[] = [];
+		const provider = (_base: string, id: string) => ({
+			cwd: `/trees/${id}`,
+			isolated: true,
+			branch: `worker/${id}`,
+			path: `/trees/${id}`,
+			finalize: () => {
+				finalized.push(id);
+				return { isolated: true, changed: true, removed: false, path: `/trees/${id}`, branch: `worker/${id}` };
+			},
+		});
+		const p = new WorkerPool({
+			maxConcurrent: 1,
+			sessionDir: "/s",
+			cwd: "/base",
+			piBin: "pi",
+			runner,
+			tadu,
+			newId: () => "w1",
+			worktree: provider,
+			onDecision: (d) => decisions.push(d),
+		});
+		p.dispatch(trig("TASK-1"));
+		expect(pendings[0]?.spec.cwd).toBe("/trees/w1"); // ran in the worktree, not the base
+		pendings[0]?.resolve(okResult(pendings[0].spec));
+		await flush();
+		expect(finalized).toContain("w1");
+		expect(comments.some(([id, t]) => id === "TASK-1" && t.includes("worktree /trees/w1"))).toBe(true);
+	});
+
+	it("does not add a preserve note when the worktree was untouched", async () => {
+		const provider = (_base: string, id: string) => ({
+			cwd: `/trees/${id}`,
+			isolated: true,
+			branch: `worker/${id}`,
+			path: `/trees/${id}`,
+			finalize: () => ({ isolated: true, changed: false, removed: true, path: `/trees/${id}`, branch: `worker/${id}` }),
+		});
+		const p = new WorkerPool({
+			maxConcurrent: 1, sessionDir: "/s", cwd: "/base", piBin: "pi", runner, tadu, newId: () => "w2", worktree: provider,
+		});
+		p.dispatch(trig("TASK-2"));
+		pendings[0]?.resolve(okResult(pendings[0].spec));
+		await flush();
+		expect(comments.some(([id, t]) => id === "TASK-2" && t.includes("Changes left"))).toBe(false);
+	});
+
 	it("drains the whole queue as workers finish", async () => {
 		const p = pool(1);
 		for (let i = 1; i <= 3; i += 1) p.dispatch(trig(`TASK-${i}`));

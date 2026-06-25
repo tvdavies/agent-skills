@@ -45,6 +45,7 @@ import { SlackBridge } from "../daemon/slack.ts";
 import { Supervisor } from "../daemon/supervisor.ts";
 import { WebhookServer } from "../daemon/webhook-server.ts";
 import { WorkerPool } from "../daemon/worker-pool.ts";
+import { prepareWorktree } from "../daemon/worktree.ts";
 
 function csv(value: string | undefined): string[] {
 	return (value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -220,12 +221,22 @@ function runDaemon(): void {
 	// task and independent tasks run concurrently. Workers write their sessions to
 	// a separate dir (so --continue never picks one up; the dashboard reads both).
 	const workerSessionsDir = join(state, "worker-sessions");
+	const workerTreesDir = join(state, "worker-trees");
+	const guardrailsPath = join(repoDir, "extensions", "guardrails", "index.ts");
+	// Isolation can be disabled (AGENT_TOOLKIT_WORKER_ISOLATION=off) for setups
+	// where the base cwd is intentionally shared or not a git repo.
+	const isolateWorkers = process.env.AGENT_TOOLKIT_WORKER_ISOLATION !== "off";
 	const workerPool = new WorkerPool({
 		maxConcurrent: Number(process.env.AGENT_TOOLKIT_WORKER_CONCURRENCY ?? 2),
 		sessionDir: workerSessionsDir,
 		cwd: process.env.AGENT_TOOLKIT_WORKER_CWD ?? repoDir,
 		piBin,
 		model,
+		// Workers run --no-extensions; re-load just the guardrails safety floor.
+		guardrailsPath,
+		// Each worker gets its own git worktree (branch worker/<id>) so concurrent
+		// workers never collide or dirty the shared checkout.
+		worktree: isolateWorkers ? (baseCwd, id) => prepareWorktree(baseCwd, id, workerTreesDir) : undefined,
 		timeoutMs: Number(process.env.AGENT_TOOLKIT_WORKER_TIMEOUT_MS ?? 15 * 60_000),
 		onDecision: (d) => recordDecision({ kind: d.kind, summary: d.summary, source: d.source ?? "worker", detail: d.detail }),
 		onEscalate: (summary) => {
