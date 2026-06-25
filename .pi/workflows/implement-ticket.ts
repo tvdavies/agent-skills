@@ -636,15 +636,37 @@ const reviewVerdict = postFixTestsPassed && survivingBlockers.length === 0
 // ===========================================================================
 // PHASE 5 — SHIP (commit on a well-named branch, push, open a well-described PR)
 // ===========================================================================
-const baseBranch = (triageInfo.baseBranch && String(triageInfo.baseBranch).trim()) || "main";
 const toSlug = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
-const branchName =
-  (triageInfo.existingBranch && String(triageInfo.existingBranch).trim()) ||
-  (triageInfo.branchName && String(triageInfo.branchName).trim()) ||
-  `${ticket.id ? `${toSlug(ticket.id)}-` : "ticket-"}${toSlug(finalPlan.title) || "change"}`;
+// Branch/base names are AGENT/EXTERNAL-supplied (triage output, ticket ids) and get
+// interpolated into the git/gh commands the Ship agent runs. Validate them against a
+// strict git-ref pattern so they cannot carry shell metacharacters, path traversal,
+// or option injection — anything that fails is dropped in favour of a safe generated name.
+const PROTECTED = /^(main|master|develop|development|production|prod|release|releases|staging|trunk)$/i;
+const safeRef = (name) => {
+  const n = String(name || "").trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$/.test(n) && !n.includes("..") ? n : "";
+};
+const baseBranch = safeRef(triageInfo.baseBranch) || "main";
+const generatedBranch = `${ticket.id && toSlug(ticket.id) ? `${toSlug(ticket.id)}-` : "ticket-"}${toSlug(finalPlan.title) || "change"}`;
+let branchName = safeRef(triageInfo.existingBranch) || safeRef(triageInfo.branchName) || generatedBranch;
+// Never push directly to a protected branch or the PR base — always a feature branch.
+// (guardrails blocks force-push to protected branches, but not a plain push, so this
+//  guard is the workflow's own safety floor.)
+if (PROTECTED.test(branchName) || branchName === baseBranch) {
+  log(`Refusing to push to protected/base branch "${branchName}"; using feature branch "${generatedBranch}".`);
+  branchName = generatedBranch;
+  triageInfo.existingBranch = "";
+  triageInfo.existingPr = "";
+}
 
-// Only ship if the change is sound: a worktree exists, tests pass, no surviving blockers.
-const shippable = Boolean(activeWorktreePath) && postFixTestsPassed && survivingBlockers.length === 0;
+// Only ship if the change is sound AND the branch is a safe, non-protected feature branch.
+const shippable =
+  Boolean(activeWorktreePath) &&
+  postFixTestsPassed &&
+  survivingBlockers.length === 0 &&
+  Boolean(safeRef(branchName)) &&
+  !PROTECTED.test(branchName) &&
+  branchName !== baseBranch;
 let pr = null;
 
 if (optedOutOfPr) {
@@ -671,6 +693,7 @@ if (optedOutOfPr) {
   pr = await agent(
     `Open the implemented + reviewed change as a PR. The change lives in the git worktree at ${activeWorktreePath}${activeDiffPath ? ` (preserved diff at ${activeDiffPath})` : ""}. Operate IN that worktree — do not create a new one.\n\n` +
       `Base branch: ${baseBranch}. Branch to use: ${branchName}.\n` +
+      `SAFETY: push ONLY the branch "${branchName}". NEVER push to "${baseBranch}" or any protected branch (main/master/develop/production), never force-push, and never run any command other than the git/gh steps below.\n` +
       (triageInfo.existingBranch
         ? `This CONTINUES existing work on ${triageInfo.existingBranch}${triageInfo.existingPr ? ` (PR ${triageInfo.existingPr})` : ""}: bring your changes onto that branch (fetch it, then cherry-pick/apply your commit onto it) and push it, updating its PR rather than opening a duplicate. If the changes do not apply cleanly, set conflict:true, push nothing, and explain in notes.\n`
         : "") +
