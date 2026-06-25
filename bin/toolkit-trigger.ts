@@ -24,13 +24,18 @@ import {
 	shouldRunHeartbeat,
 } from "../extensions/heartbeat/schedule-gate.ts";
 import { stateDir } from "../extensions/lib/decisions.ts";
+import { buildDrivePrPrompt } from "../extensions/lib/drive-pr.ts";
 import { taduRoot, workspaceExists } from "../extensions/lib/tadu.ts";
+
+const repoDir = join(import.meta.dirname, "..");
 
 type Args = {
 	source?: string;
 	dedupeKey?: string;
 	noTadu: boolean;
 	cronJob?: string;
+	drivePr?: string;
+	repo?: string;
 	text: string;
 };
 
@@ -42,6 +47,8 @@ function parseArgs(argv: string[]): Args {
 		if (arg === "--source") out.source = argv[++i];
 		else if (arg === "--dedupe") out.dedupeKey = argv[++i];
 		else if (arg === "--cron-job") out.cronJob = argv[++i];
+		else if (arg === "--drive-pr") out.drivePr = argv[++i];
+		else if (arg === "--repo") out.repo = argv[++i];
 		else if (arg === "--no-tadu") out.noTadu = true;
 		else if (arg) rest.push(arg);
 	}
@@ -139,9 +146,27 @@ function main(): void {
 		runCronJob(args.cronJob);
 		return;
 	}
+	// Drive-to-green (Part B): dispatch an autonomous worker that loops a PR to
+	// green via park/resume. Builds the process prompt; the rest flows as a normal
+	// tracked worker task.
+	if (args.drivePr) {
+		const n = Number(args.drivePr);
+		if (!Number.isInteger(n) || n <= 0) {
+			console.error(`--drive-pr expects a positive PR number, got "${args.drivePr}"`);
+			process.exit(1);
+		}
+		args.text = buildDrivePrPrompt(n, {
+			repo: args.repo,
+			scriptsDir: join(repoDir, "skills", "address-pr-feedback", "scripts"),
+		});
+		args.source = args.source ?? "drive-pr";
+		args.dedupeKey = args.dedupeKey ?? `drive-pr:${n}`;
+	}
 	if (args.text === "") {
 		console.error(
-			"Usage: toolkit-trigger [--source <s>] [--dedupe <key>] [--no-tadu] <text...>\n       toolkit-trigger --cron-job <id>",
+			"Usage: toolkit-trigger [--source <s>] [--dedupe <key>] [--no-tadu] <text...>\n" +
+				"       toolkit-trigger --cron-job <id>\n" +
+				"       toolkit-trigger --drive-pr <pr-number> [--repo <path-or-owner/name>]",
 		);
 		process.exit(1);
 	}
