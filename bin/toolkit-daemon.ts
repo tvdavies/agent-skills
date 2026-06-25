@@ -252,13 +252,18 @@ function runDaemon(): void {
 		},
 		onNeedsHuman: ({ question, runId, taskId }) => {
 			// Push the question now; the detail carries the ref so the dashboard reply
-			// box (and a Slack reply) can resume the exact worker.
-			notify({
-				summary: `Needs your decision${taskId ? ` (${taskId})` : ""}: ${question}`,
-				kind: "escalate",
-				source: "needs-human",
-				detail: { needsHuman: true, runId, taskId },
-			});
+			// box (and a Slack reply) can resume the exact worker. force: a genuine
+			// block must never be dropped by the escalation budget — and it can't spam
+			// (the worker is parked after one needs_human call until it is answered).
+			notify(
+				{
+					summary: `Needs your decision${taskId ? ` (${taskId})` : ""}: ${question}`,
+					kind: "escalate",
+					source: "needs-human",
+					detail: { needsHuman: true, runId, taskId },
+				},
+				{ force: true },
+			);
 		},
 		logger: (m) => console.error(m),
 	});
