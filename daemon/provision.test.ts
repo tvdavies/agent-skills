@@ -37,6 +37,12 @@ describe("renderEnvFile", () => {
 		const out = renderEnvFile({ ...cfg, userBinDir: "/home/tom/.local/bin" });
 		expect(out).toContain("export PATH=/home/tom/.nvm/v24/bin:/home/tom/.local/bin:$PATH");
 	});
+
+	it("puts bun on PATH and exports AGENT_TOOLKIT_BUN_BIN (the self-update validate gate)", () => {
+		const out = renderEnvFile({ ...cfg, bunBin: "/home/tom/.bun/bin/bun" });
+		expect(out).toContain("/home/tom/.bun/bin:$PATH");
+		expect(out).toContain("export AGENT_TOOLKIT_BUN_BIN=/home/tom/.bun/bin/bun");
+	});
 });
 
 describe("renderLauncher", () => {
@@ -49,6 +55,17 @@ describe("renderLauncher", () => {
 		expect(out).toContain(
 			'exec node --experimental-transform-types --no-warnings "/home/tom/agent-toolkit/bin/toolkit-daemon.ts"',
 		);
+		expect(out).not.toContain("toolkit-preflight"); // omitted when no preflightEntry
+	});
+
+	it("runs the self-update preflight before the daemon when configured", () => {
+		const out = renderLauncher({ ...cfg, preflightEntry: "/home/tom/agent-toolkit/bin/toolkit-preflight.ts" });
+		// Preflight runs first (best-effort), then the daemon execs.
+		const pre = out.indexOf("toolkit-preflight.ts");
+		const exec = out.indexOf("exec node");
+		expect(pre).toBeGreaterThan(-1);
+		expect(pre).toBeLessThan(exec);
+		expect(out).toContain('"/home/tom/agent-toolkit/bin/toolkit-preflight.ts" || true');
 	});
 });
 

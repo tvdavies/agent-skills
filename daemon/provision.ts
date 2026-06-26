@@ -8,6 +8,8 @@
  * the same renderers target a workstation today and an always-on server later.
  */
 
+import { dirname } from "node:path";
+
 export type ProvisionConfig = {
 	/** Logical instance name; becomes the systemd unit name. */
 	instance: string;
@@ -15,6 +17,9 @@ export type ProvisionConfig = {
 	repoDir: string;
 	/** Absolute path to the daemon entry (bin/toolkit-daemon.ts). */
 	daemonEntry: string;
+	/** Absolute path to the launcher preflight (bin/toolkit-preflight.ts) — the
+	 *  self-update rollback guard, run before the daemon on every (re)start. */
+	preflightEntry?: string;
 	/** Command that runs TypeScript, e.g. node --experimental-transform-types. */
 	runtime: string;
 	/** XDG-style state, session, and brain locations. */
@@ -33,6 +38,9 @@ export type ProvisionConfig = {
 	userBinDir?: string;
 	/** Absolute path to the pi binary, for AGENT_TOOLKIT_PI_BIN under systemd. */
 	piBin?: string;
+	/** Absolute path to the bun binary — the self-update validate gate runs `bun test`,
+	 *  and bun is usually NOT on the minimal systemd PATH. */
+	bunBin?: string;
 };
 
 const MEMORY_MAX = "8G";
@@ -43,10 +51,12 @@ export function renderEnvFile(cfg: ProvisionConfig): string {
 		`# ${cfg.instance} environment — sourced by the launcher.`,
 		`# Mode 0600, owned by the service user. Put real secrets below the marker.`,
 	];
-	// Make node/pi and user CLIs (tadu) resolvable under systemd (PATH is minimal there).
-	const pathDirs = [cfg.nodeBinDir, cfg.userBinDir].filter(Boolean);
+	// Make node/pi/bun and user CLIs (tadu) resolvable under systemd (PATH is minimal there).
+	const bunBinDir = cfg.bunBin ? dirname(cfg.bunBin) : undefined;
+	const pathDirs = [cfg.nodeBinDir, cfg.userBinDir, bunBinDir].filter((d, i, a) => d && a.indexOf(d) === i);
 	if (pathDirs.length) lines.push(`export PATH=${pathDirs.join(":")}:$PATH`);
 	if (cfg.piBin) lines.push(`export AGENT_TOOLKIT_PI_BIN=${cfg.piBin}`);
+	if (cfg.bunBin) lines.push(`export AGENT_TOOLKIT_BUN_BIN=${cfg.bunBin}`);
 	lines.push(
 		`export AGENT_TOOLKIT_STATE_DIR=${cfg.stateDir}`,
 		`export AGENT_TOOLKIT_BRAIN_ROOT=${cfg.brainRoot}`,
@@ -94,7 +104,14 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 cd "${cfg.repoDir}"
-exec ${cfg.runtime} "${cfg.daemonEntry}"
+${
+	cfg.preflightEntry
+		? `# Self-update rollback guard: if a self-update restart keeps failing to boot,
+# revert the checkout to the last-good commit before starting (best-effort).
+${cfg.runtime} "${cfg.preflightEntry}" || true
+`
+		: ""
+}exec ${cfg.runtime} "${cfg.daemonEntry}"
 `;
 }
 

@@ -167,7 +167,7 @@ export function runWorker(spec: WorkerSpec, spawn: SpawnFn = nodeSpawn): WorkerH
 
 /** Daemon env minus the secrets/tokens a worker must never see. */
 export function workerEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-	const denied = /^SLACK_|^WEBHOOK_|SIGNING_SECRET|DASHBOARD_TOKEN/;
+	const denied = /^SLACK_|^WEBHOOK_|SIGNING_SECRET|DASHBOARD_TOKEN|SELF_UPDATE_TOKEN/;
 	const out: NodeJS.ProcessEnv = {};
 	for (const [key, value] of Object.entries(env)) {
 		if (!denied.test(key)) out[key] = value;

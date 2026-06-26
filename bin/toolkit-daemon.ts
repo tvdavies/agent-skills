@@ -16,6 +16,7 @@
  * AGENT_TOOLKIT_PI_BIN.
  */
 
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -28,6 +29,7 @@ import { INITIAL_RUNS_STATE, recordRun, type RunsState } from "../extensions/lib
 import { applyCumulativeCost, INITIAL_SPEND_STATE, type SpendState } from "../extensions/lib/spend.ts";
 import { writeAnswer } from "../extensions/lib/park.ts";
 import { agentTaduEnv, lastMoveOrigin } from "../extensions/lib/tadu-actor.ts";
+import { clearUpdateRequest, readUpdateRequest } from "../extensions/lib/update.ts";
 import { ensureWorkspace, getTask, listTasks, readConfig, readEvents, taduRoot, workspaceExists } from "../extensions/lib/tadu.ts";
 import { humanTaduControl, taduControl } from "../daemon/tadu-control.ts";
 import { ControlLoop } from "../daemon/control-loop.ts";
@@ -45,6 +47,7 @@ import {
 } from "../daemon/provision.ts";
 import { classifyTrigger } from "../daemon/route.ts";
 import { RpcClient } from "../daemon/rpc-client.ts";
+import { bunTestValidator, gitOps, isAuthorisedRequest, SelfUpdater } from "../daemon/self-update.ts";
 import { SlackBridge } from "../daemon/slack.ts";
 import { Supervisor } from "../daemon/supervisor.ts";
 import { TaduWatcher } from "../daemon/tadu-watch.ts";
@@ -78,6 +81,7 @@ function provisionConfig(): ProvisionConfig {
 		instance,
 		repoDir,
 		daemonEntry: join(repoDir, "bin", "toolkit-daemon.ts"),
+		preflightEntry: join(repoDir, "bin", "toolkit-preflight.ts"),
 		runtime: `${process.execPath} --experimental-transform-types --no-warnings`,
 		stateDir: state,
 		sessionDir,
@@ -91,7 +95,19 @@ function provisionConfig(): ProvisionConfig {
 		// User CLIs (tadu) conventionally live here; needed for the TADU spine.
 		userBinDir: join(homedir(), ".local", "bin"),
 		piBin: process.env.AGENT_TOOLKIT_PI_BIN ?? join(dirname(process.execPath), "pi"),
+		// The self-update validate gate runs `bun test`; resolve bun absolutely so it
+		// works under the minimal systemd PATH.
+		bunBin: resolveBunBin(),
 	};
+}
+
+/** Resolve an absolute bun path for the env file (bun is rarely on the systemd PATH). */
+function resolveBunBin(): string | undefined {
+	if (process.env.AGENT_TOOLKIT_BUN_BIN) return process.env.AGENT_TOOLKIT_BUN_BIN;
+	const found = spawnSync("bash", ["-lc", "command -v bun"], { encoding: "utf8" }).stdout?.trim();
+	if (found) return found;
+	const home = join(homedir(), ".bun", "bin", "bun");
+	return existsSync(home) ? home : undefined;
 }
 
 function printUnits(): void {
@@ -197,6 +213,9 @@ function runDaemon(): void {
 	// Cost/usage guards: pause forwarding once a daily cap is hit. The USD cap
 	// suits per-token billing; the runs/day cap is the guard for subscription
 	// auth (where cost reads ~$0). Either may pause; both reset daily.
+	// Capability token for self-update: regenerated each daemon start, injected only into
+	// the resident's env, so only the resident can authorise loading its own code change.
+	const selfUpdateToken = randomUUID();
 	let currentClient: RpcClient | undefined;
 	let spendPaused = false;
 	let runsPaused = false;
@@ -279,8 +298,16 @@ function runDaemon(): void {
 		createClient: () => {
 			// Stamp the resident orchestrator's env so ITS tadu writes (a lane move /
 			// comment from the agent) are attributed to the agent, never mistaken for
-			// human board input by the watch loop. (Same process env otherwise.)
-			currentClient = new RpcClient({ command: piBin, args: piArgs, cwd: repoDir, env: agentTaduEnv(), logger: (m) => console.error(m) });
+			// human board input by the watch loop. Also inject the self-update capability
+			// token HERE only — the resident may request a self-update; workers (which get
+			// workerEnv, with the token stripped) cannot forge one.
+			currentClient = new RpcClient({
+				command: piBin,
+				args: piArgs,
+				cwd: repoDir,
+				env: { ...agentTaduEnv(), AGENT_TOOLKIT_SELF_UPDATE_TOKEN: selfUpdateToken },
+				logger: (m) => console.error(m),
+			});
 			return currentClient;
 		},
 		delegate: (trigger) => classifyTrigger(trigger) === "worker",
@@ -485,6 +512,9 @@ function runDaemon(): void {
 		`[toolkit-daemon] started (instance=${instance}, slack=${slack ? "on" : "off"}, webhook=${webhook ? "on" : "off"}, dashboard=on, taduWatch=${taduWatcher ? "on" : "off"}, workers=${Number(process.env.AGENT_TOOLKIT_WORKER_CONCURRENCY ?? 2)}, spendCap=${dailyCapUsd > 0 ? `$${dailyCapUsd}` : "off"}, runsCap=${maxRunsPerDay > 0 ? maxRunsPerDay : "off"})`,
 	);
 
+	let updatePollTimer: ReturnType<typeof setInterval> | undefined;
+	let healthGateTimer: ReturnType<typeof setTimeout> | undefined;
+	let probeTimer: ReturnType<typeof setInterval> | undefined;
 	let shuttingDown = false;
 	const shutdown = async () => {
 		if (shuttingDown) return;
@@ -493,6 +523,9 @@ function runDaemon(): void {
 		if (spendTimer) clearInterval(spendTimer);
 		clearInterval(stateTimer);
 		clearTimeout(initialStateTimer);
+		if (updatePollTimer) clearInterval(updatePollTimer);
+		if (healthGateTimer) clearTimeout(healthGateTimer);
+		if (probeTimer) clearInterval(probeTimer);
 		taduWatcher?.stop();
 		notifyWatcher?.stop();
 		await dashboard.stop();
@@ -506,6 +539,88 @@ function runDaemon(): void {
 	};
 	process.on("SIGTERM", shutdown);
 	process.on("SIGINT", shutdown);
+
+	// Self-update: the agent edits the live checkout and calls `apply_update`; the
+	// daemon validates (bun test), commits, and restarts onto the new code. The launcher
+	// preflight rolls back if it will not boot; the probation gate below keeps the
+	// rollback marker until the new code has survived a settle window healthy.
+	const selfUpdater = new SelfUpdater({
+		stateDir: state,
+		git: gitOps(repoDir),
+		validate: bunTestValidator(repoDir),
+		notify: (summary, opts) => notify({ summary, kind: "escalate", source: "self-update" }, opts),
+		record: (kind, summary, detail) => recordDecision({ kind, summary, source: "self-update", detail }),
+		restart: () => void shutdown(), // drain + exit(0); systemd re-execs the new code
+		resume: (prompt) => inbox.append({ text: prompt, source: "self-update" }),
+		now: Date.now,
+		logger: (m) => console.error(m),
+	});
+	// Report a rollback the launcher performed on the previous boot, if any.
+	selfUpdater.onBoot();
+
+	// Drain a pending update request (validate → commit → restart), but ONLY if it
+	// carries the resident's capability token — a request forged by a worker is refused.
+	let applying = false;
+	updatePollTimer = setInterval(() => {
+		if (applying || shuttingDown) return;
+		const req = readUpdateRequest(state);
+		if (!req) return;
+		if (!isAuthorisedRequest(req, selfUpdateToken)) {
+			recordDecision({ kind: "self-update-refused", summary: "Refused a self-update request with no valid token (origin is not the resident).", source: "self-update" });
+			notify({ summary: "Refused a self-update request from a non-resident origin.", kind: "escalate", source: "self-update" }, { force: true });
+			clearUpdateRequest(state);
+			return;
+		}
+		applying = true;
+		void selfUpdater
+			.apply(req)
+			.catch((e) => console.error(`[self-update] apply failed: ${e}`))
+			.finally(() => {
+				applying = false;
+			});
+	}, Number(process.env.AGENT_TOOLKIT_SELF_UPDATE_POLL_MS ?? 5000));
+
+	// Probation gate. A fresh self-update keeps its rollback marker until it has run
+	// healthy through a settle window: a crash before then leaves the marker for the
+	// preflight to roll back, and last-good is NOT advanced until the window passes.
+	const probeResident = async (): Promise<boolean> => {
+		if (!currentClient) return false;
+		try {
+			return Boolean(await currentClient.request({ type: "get_state" }, 5000));
+		} catch {
+			return false;
+		}
+	};
+	const onProbation = selfUpdater.pendingRestart();
+	// Resume the agent (and, on a plain boot, record the rollback baseline) as soon as
+	// the resident is confirmed alive — fresh probe, not a sticky flag.
+	probeTimer = setInterval(() => {
+		if (shuttingDown) return;
+		void probeResident().then((alive) => {
+			if (!alive) return;
+			if (onProbation) {
+				selfUpdater.resumeAfterUpdate();
+			} else {
+				selfUpdater.recordLastGood();
+				if (probeTimer) clearInterval(probeTimer);
+			}
+		});
+	}, 10_000);
+	if (onProbation) {
+		const settleMs = Number(process.env.AGENT_TOOLKIT_SELF_UPDATE_SETTLE_MS ?? 180_000);
+		healthGateTimer = setTimeout(() => {
+			if (shuttingDown) return;
+			if (probeTimer) clearInterval(probeTimer);
+			void probeResident().then((alive) => {
+				if (alive) {
+					selfUpdater.commitPoint(); // survived probation: clear marker, advance last-good
+				} else {
+					console.error("[self-update] resident not healthy at the settle window; exiting to trigger rollback");
+					process.exit(1);
+				}
+			});
+		}, settleMs);
+	}
 }
 
 function readJson(path: string): unknown {
