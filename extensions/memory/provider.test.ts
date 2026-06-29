@@ -73,3 +73,19 @@ describe("conformExtraction", () => {
 		expect(out[0].filename).toBe("y.md");
 	});
 });
+
+import { salvageMemoryArray } from "./provider";
+describe("salvageMemoryArray", () => {
+	it("recovers complete objects from a truncated array (hit output cap mid-JSON)", () => {
+		const truncated = '{"memories":[{"name":"A","content":"x"},{"name":"B","content":"y"},{"name":"C","content":"tru';
+		const out = salvageMemoryArray(truncated);
+		expect(out?.length).toBe(2); // A and B recovered; C dropped
+		expect((out?.[0] as { name: string }).name).toBe("A");
+	});
+	it("conformExtraction salvages + fills filenames on a truncated extraction", () => {
+		const truncated = '{"memories":[{"name":"Run tests","content":"bun test"},{"name":"Restart","conte';
+		const out = JSON.parse(conformExtraction(truncated));
+		expect(out.length).toBe(1);
+		expect(out[0].filename).toBe("run-tests.md");
+	});
+});

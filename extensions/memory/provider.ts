@@ -92,6 +92,47 @@ const firstNonEmpty = (...vals: unknown[]): string => {
  * Only touches recognisable extraction JSON (an array of name-bearing objects, or a
  * `{ memories: [...] }` wrapper); reflection/consolidation responses + prose pass through.
  */
+/**
+ * Salvage complete memory objects from a TRUNCATED array — local models routinely hit
+ * the library's hard 4096-token output cap mid-JSON, which otherwise loses the entire
+ * (often large) extraction. Scans the array, collects every top-level {...} that parses,
+ * and drops the trailing incomplete one. String-aware so braces inside values don't fool it.
+ */
+export function salvageMemoryArray(text: string): unknown[] | undefined {
+	const start = text.indexOf("[");
+	if (start < 0) return undefined;
+	const objects: unknown[] = [];
+	let depth = 0;
+	let objStart = -1;
+	let inString = false;
+	let escaped = false;
+	for (let i = start + 1; i < text.length; i += 1) {
+		const ch = text[i];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === '"') inString = false;
+			continue;
+		}
+		if (ch === '"') inString = true;
+		else if (ch === "{") {
+			if (depth === 0) objStart = i;
+			depth += 1;
+		} else if (ch === "}") {
+			depth -= 1;
+			if (depth === 0 && objStart >= 0) {
+				try {
+					objects.push(JSON.parse(text.slice(objStart, i + 1)));
+				} catch {
+					// incomplete/corrupt object — skip
+				}
+				objStart = -1;
+			}
+		}
+	}
+	return objects.length > 0 ? objects : undefined;
+}
+
 export function conformExtraction(content: string): string {
 	const block = firstJsonBlock(content);
 	if (block === undefined) return content;
@@ -99,11 +140,14 @@ export function conformExtraction(content: string): string {
 	try {
 		parsed = JSON.parse(block);
 	} catch {
-		// Tolerate trailing commas (a common local-model quirk) before giving up.
+		// Tolerate trailing commas (a common local-model quirk).
 		try {
 			parsed = JSON.parse(block.replace(/,(\s*[}\]])/g, "$1"));
 		} catch {
-			return content;
+			// Last resort: salvage complete objects from a truncated array.
+			const salvaged = salvageMemoryArray(content);
+			if (salvaged) parsed = salvaged;
+			else return content;
 		}
 	}
 	// Accept every shape the library will later try to persist: an array, a

@@ -50,7 +50,9 @@ export type BrainEngine = {
 	/** Recall relevant memories and format them for prompt injection. */
 	recall(query: string, topK?: number): Promise<{ block: string; count: number }>;
 	/** Distil durable memories from messages (redacted first), then commit. */
-	extract(messages: readonly RoleMessage[], opts: { sessionId: string; scope?: Scope }): Promise<unknown[]>;
+	extract(messages: readonly RoleMessage[], opts: { sessionId: string; scope?: Scope; actorId?: string }): Promise<unknown[]>;
+	/** Commit the brain to git (best-effort) — for batch callers that disable per-extract commit. */
+	commit(message?: string): void;
 };
 
 export async function createBrainEngine(opts: BrainEngineOptions = {}): Promise<BrainEngine> {
@@ -94,9 +96,20 @@ export async function createBrainEngine(opts: BrainEngineOptions = {}): Promise<
 			const safe = redactMessages(messages);
 			// RoleMessage.role is a plain string; the library narrows to a role union —
 			// cast across the boundary (the content is what extraction reads).
-			const res = (await memory.extract({ messages: safe as never, sessionId: extractOpts.sessionId, scope: extractOpts.scope ?? scope })) as unknown[];
+			const res = (await memory.extract({
+				messages: safe as never,
+				sessionId: extractOpts.sessionId,
+				scope: extractOpts.scope ?? scope,
+				...(extractOpts.actorId ? { actorId: extractOpts.actorId } : {}),
+			})) as unknown[];
 			if (useGit && res.length > 0) commitBrain(root, `memory: extract ${extractOpts.sessionId} (+${res.length})`);
 			return res;
+		},
+		commit(message = "memory: ingest") {
+			// Explicit commit: always versions (the dreamer runs per-extract git OFF for
+			// speed, then commits the whole batch once at the end).
+			ensureGitRepo(root);
+			commitBrain(root, message);
 		},
 	};
 }
