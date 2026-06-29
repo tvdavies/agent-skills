@@ -40,11 +40,15 @@ beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "brain-ext-"));
 	process.env.AGENT_TOOLKIT_BRAIN_ROOT = root;
 	process.env.AGENT_TOOLKIT_BRAIN_RECALL = "on";
+	// The in-process OKF brain is now opt-in (the external `brain` engine is the
+	// default); select it explicitly so this extension activates.
+	process.env.AGENT_TOOLKIT_MEMORY_ENGINE = "okf";
 });
 
 afterEach(() => {
 	rmSync(root, { recursive: true, force: true });
 	delete process.env.AGENT_TOOLKIT_BRAIN_ROOT;
+	delete process.env.AGENT_TOOLKIT_MEMORY_ENGINE;
 });
 
 async function loadExtension() {

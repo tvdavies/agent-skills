@@ -61,6 +61,9 @@ export function renderEnvFile(cfg: ProvisionConfig): string {
 		`export AGENT_TOOLKIT_STATE_DIR=${cfg.stateDir}`,
 		`export AGENT_TOOLKIT_BRAIN_ROOT=${cfg.brainRoot}`,
 		`export AGENT_TOOLKIT_SESSION_DIR=${cfg.sessionDir}`,
+		// Memory = the external `brain` CLI (resolved on PATH via the bun bin dir
+		// above). "okf" reverts to the in-process OKF brain; "off" disables memory.
+		`export AGENT_TOOLKIT_MEMORY_ENGINE=brain`,
 		cfg.model ? `export AGENT_TOOLKIT_MODEL=${cfg.model}` : `# export AGENT_TOOLKIT_MODEL=anthropic/claude-opus-4-8`,
 		``,
 		`# --- secrets (Phase 3+) ---`,
