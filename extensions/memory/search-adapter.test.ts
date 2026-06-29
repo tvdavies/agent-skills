@@ -23,6 +23,10 @@ describe("scoreNote", () => {
 		expect(scoreNote("always run bun test for the suite", "x.md", ["tests"])).toBeGreaterThan(0);
 		expect(scoreNote("the daemons are restarting", "x.md", ["daemon"])).toBeGreaterThan(0);
 	});
+	it("does NOT fold 'ss' words or short terms (no class→clas false match)", () => {
+		expect(scoreNote("the clas room", "x.md", ["class"])).toBe(0); // would falsely match if 's' stripped
+		expect(scoreNote("the i variable", "x.md", ["is"])).toBe(0); // short term not folded
+	});
 	it("gives a filename-match bonus", () => {
 		const inName = scoreNote("some text", "restart-daemon.md", terms);
 		expect(inName).toBeGreaterThan(0);

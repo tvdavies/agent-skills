@@ -99,13 +99,27 @@ export function conformExtraction(content: string): string {
 	try {
 		parsed = JSON.parse(block);
 	} catch {
-		return content;
+		// Tolerate trailing commas (a common local-model quirk) before giving up.
+		try {
+			parsed = JSON.parse(block.replace(/,(\s*[}\]])/g, "$1"));
+		} catch {
+			return content;
+		}
 	}
-	const items = Array.isArray(parsed)
+	// Accept every shape the library will later try to persist: an array, a
+	// { memories: [...] } / { memory: {...} } wrapper, or a bare single memory object.
+	const looksLikeMemory = (o: unknown): boolean =>
+		!!o && typeof o === "object" && ["name", "filename", "content", "description", "index_entry"].some((k) => k in (o as object));
+	const wrap = (o: unknown): unknown[] => [o];
+	const items: unknown[] | undefined = Array.isArray(parsed)
 		? parsed
 		: parsed && typeof parsed === "object" && Array.isArray((parsed as { memories?: unknown }).memories)
 			? (parsed as { memories: unknown[] }).memories
-			: undefined;
+			: parsed && typeof parsed === "object" && looksLikeMemory((parsed as { memory?: unknown }).memory)
+				? wrap((parsed as { memory: unknown }).memory)
+				: looksLikeMemory(parsed)
+					? wrap(parsed)
+					: undefined;
 	if (!items) return content;
 	let changed = false;
 	for (const m of items) {

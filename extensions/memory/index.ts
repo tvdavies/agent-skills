@@ -38,9 +38,24 @@ function recallBudgetMs(): number {
 	return Number.isFinite(n) && n > 0 ? n : 800;
 }
 
-/** Race a promise against a timeout; resolve to `fallback` if it overruns. */
-function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
-	return Promise.race([p, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
+/** Race a promise against a timeout; resolve to `fallback` if it overruns or rejects.
+ *  Clears the timer when the work settles so it never leaks. */
+function withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+	let timer: ReturnType<typeof setTimeout>;
+	const settle = work.then(
+		(v) => {
+			clearTimeout(timer);
+			return v;
+		},
+		() => {
+			clearTimeout(timer);
+			return fallback;
+		},
+	);
+	const timeout = new Promise<T>((resolve) => {
+		timer = setTimeout(() => resolve(fallback), ms);
+	});
+	return Promise.race([settle, timeout]);
 }
 
 export default function memoryExtension(pi: ExtensionAPI): void {
@@ -56,6 +71,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 				.then((m) => m.createBrainEngine())
 				.catch((e) => {
 					console.error(`[memory] engine init failed: ${(e as Error).message}`);
+					enginePromise = undefined; // allow a retry on a later turn
 					return undefined;
 				});
 		}
@@ -63,16 +79,23 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 	};
 
 	pi.on("before_agent_start", async (event) => {
-		const systemPrompt = event.systemPrompt.includes(MARKER) ? event.systemPrompt : `${event.systemPrompt}${ADDENDUM}`;
-		try {
-			const engine = await getEngine();
-			if (!engine || !event.prompt?.trim()) return { systemPrompt };
-			// Bounded + best-effort: a slow/empty recall must never delay the turn.
-			const { block } = await withTimeout(engine.recall(event.prompt, recallLimit()), recallBudgetMs(), { block: "", count: 0 });
-			return { systemPrompt: block ? `${systemPrompt}\n\n${block}` : systemPrompt };
-		} catch {
-			return { systemPrompt };
-		}
+		if (!event.prompt?.trim()) return { systemPrompt: event.systemPrompt };
+		// Bound the WHOLE thing (engine init + recall) so a slow init or model never
+		// delays the turn; degrade to "no injection".
+		const block = await withTimeout(
+			(async () => {
+				const engine = await getEngine();
+				if (!engine) return undefined; // unavailable → no addendum, no block
+				return (await engine.recall(event.prompt, recallLimit())).block;
+			})(),
+			recallBudgetMs(),
+			undefined as string | undefined,
+		);
+		if (block === undefined) return { systemPrompt: event.systemPrompt }; // engine down/slow
+		// Engine is available: advertise the memory facility (even if no hit this turn), and
+		// inject the block when there is one.
+		const base = event.systemPrompt.includes(MARKER) ? event.systemPrompt : `${event.systemPrompt}${ADDENDUM}`;
+		return { systemPrompt: block ? `${base}\n\n${block}` : base };
 	});
 
 	const querySchema = Type.Object({

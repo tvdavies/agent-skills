@@ -58,4 +58,18 @@ describe("conformExtraction", () => {
 		expect(conformExtraction(reflection)).toBe(reflection);
 		expect(conformExtraction("just some prose, no json")).toBe("just some prose, no json");
 	});
+	it("tolerates trailing commas (a local-model quirk)", () => {
+		const out = JSON.parse(conformExtraction('[{"name":"X","content":"c",},]'));
+		expect(out[0].filename).toBe("x.md");
+	});
+	it("handles a { memory: {...} } wrapper and a bare single object", () => {
+		const single = JSON.parse(conformExtraction(JSON.stringify({ memory: { name: "Solo note", content: "c" } })));
+		expect(single.memory.filename).toBe("solo-note.md");
+		const bare = JSON.parse(conformExtraction(JSON.stringify({ name: "Bare note", content: "c" })));
+		expect(bare.filename).toBe("bare-note.md");
+	});
+	it("conforms even when the model wraps JSON in a prose preamble", () => {
+		const out = JSON.parse(conformExtraction('Here are the memories: [{"name":"Y","content":"c"}] hope that helps'));
+		expect(out[0].filename).toBe("y.md");
+	});
 });

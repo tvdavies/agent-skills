@@ -78,8 +78,15 @@ export async function createBrainEngine(opts: BrainEngineOptions = {}): Promise<
 		root,
 		scope,
 		async recall(query, topK = 6) {
-			const ctx = await memory.contextualise({ message: query, topK, scope, fallbackScopes });
-			return { block: ctx.systemReminder?.trim() ?? "", count: ctx.memories.length };
+			// selector: "off" keeps recall a pure index lookup — the default "auto" makes a
+			// blocking LLM call to the extraction provider every turn (it would no-op recall
+			// when LM Studio is slow/down, and violate the no-network recall invariant).
+			const ctx = await memory.contextualise({ message: query, topK, scope, fallbackScopes, selector: "off" });
+			let block = ctx.systemReminder?.trim() ?? "";
+			// Bound the injected block — a single large note must not blow the prompt.
+			const max = Number(process.env.AGENT_TOOLKIT_MEMORY_RECALL_MAX_CHARS ?? 4000);
+			if (block.length > max) block = `${block.slice(0, max).trimEnd()}\n…[memory truncated]`;
+			return { block, count: ctx.memories.length };
 		},
 		async extract(messages, extractOpts) {
 			// Redaction is OURS — the library does not scrub secrets, and ingest scope

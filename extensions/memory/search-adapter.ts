@@ -43,17 +43,25 @@ function countOccurrences(haystack: string, needle: string): number {
 	return n;
 }
 
+/** A plural/singular variant of a term, or undefined if folding is unsafe. Skips
+ *  short terms and 'ss' words ("class"→"clas", "is"→"i") to avoid false matches. */
+function stemVariant(term: string): string | undefined {
+	if (term.length > 4 && term.endsWith("s") && !term.endsWith("ss")) return term.slice(0, -1);
+	if (term.length >= 3 && !term.endsWith("s")) return `${term}s`;
+	return undefined;
+}
+
 /** Occurrences of a term with light plural/singular folding ("tests" ↔ "test"). */
 function termFrequency(body: string, term: string): number {
 	let n = countOccurrences(body, term);
-	if (term.length > 3 && term.endsWith("s")) n += countOccurrences(body, term.slice(0, -1));
-	else n += countOccurrences(body, `${term}s`);
+	const variant = stemVariant(term);
+	if (variant) n += countOccurrences(body, variant);
 	return n;
 }
 function nameMatches(name: string, term: string): boolean {
 	if (name.includes(term)) return true;
-	if (term.length > 3 && term.endsWith("s")) return name.includes(term.slice(0, -1));
-	return name.includes(`${term}s`);
+	const variant = stemVariant(term);
+	return variant ? name.includes(variant) : false;
 }
 
 /**
@@ -93,12 +101,13 @@ export function createBm25SearchIndex(store: Store) {
 		): Promise<readonly SearchHit[]> {
 			const terms = queryTerms(query);
 			if (terms.length === 0) return [];
-			const prefix = scopePrefix(opts.scope ?? "global", opts.actorId ?? "");
 			let entries: ReadonlyArray<{ path: string; isDir: boolean }>;
 			try {
+				// scopePrefix can throw on a bad actorId — keep it inside the guard.
+				const prefix = scopePrefix(opts.scope ?? "global", opts.actorId ?? "");
 				entries = (await store.list(prefix, { recursive: true })) as ReadonlyArray<{ path: string; isDir: boolean }>;
 			} catch {
-				return []; // scope dir absent (no memories yet) — not an error
+				return []; // scope dir absent (no memories yet) or bad scope — not an error
 			}
 			const hits: SearchHit[] = [];
 			for (const e of entries) {
