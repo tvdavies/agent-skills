@@ -121,4 +121,25 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			};
 		},
 	});
+
+	const rememberSchema = Type.Object({
+		fact: Type.String({ description: "A durable, reusable fact, decision, preference, or correction worth keeping for future sessions. No secrets or transient chatter." }),
+	});
+	type RememberInput = Static<typeof rememberSchema>;
+
+	pi.registerTool({
+		name: "memory_remember",
+		label: "memory remember",
+		description: "Persist a durable fact to memory right now (it would otherwise be captured only when the session is later ingested). Use for a preference, decision, fact, or correction worth keeping. Recall is automatic each turn; this is for immediate, explicit capture.",
+		parameters: rememberSchema,
+		async execute(_id, params: RememberInput) {
+			const engine = await getEngine();
+			if (!engine) return { content: [{ type: "text" as const, text: "Memory engine is unavailable." }], details: { ok: false, count: 0 } };
+			const recorded = await engine.remember(params.fact);
+			return {
+				content: [{ type: "text" as const, text: recorded.length ? `Recorded ${recorded.length} memory item(s).` : "Nothing durable to record from that." }],
+				details: { ok: true, count: recorded.length },
+			};
+		},
+	});
 }

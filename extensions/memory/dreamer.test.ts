@@ -24,6 +24,9 @@ function fakeEngine(perSession = 2): BrainEngine {
 			extracts.push({ sessionId: opts.sessionId, system: sys, count: perSession });
 			return Array.from({ length: perSession }, (_, i) => ({ i }));
 		},
+		async remember() {
+			return [];
+		},
 		commit() {
 			commits += 1;
 		},

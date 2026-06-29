@@ -51,6 +51,8 @@ export type BrainEngine = {
 	recall(query: string, topK?: number): Promise<{ block: string; count: number }>;
 	/** Distil durable memories from messages (redacted first), then commit. */
 	extract(messages: readonly RoleMessage[], opts: { sessionId: string; scope?: Scope; actorId?: string }): Promise<unknown[]>;
+	/** Explicitly record a fact the agent wants kept now (redacted; persisted immediately). */
+	remember(text: string): Promise<unknown[]>;
 	/** Commit the brain to git (best-effort) — for batch callers that disable per-extract commit. */
 	commit(message?: string): void;
 };
@@ -75,6 +77,20 @@ export async function createBrainEngine(opts: BrainEngineOptions = {}): Promise<
 
 	const fallbackScopes = ALL_SCOPES.filter((s) => s !== scope);
 
+	const doExtract = async (messages: readonly RoleMessage[], extractOpts: { sessionId: string; scope?: Scope; actorId?: string }): Promise<unknown[]> => {
+		// Redaction is OURS — the library does not scrub secrets, and ingest scope is
+		// "all sessions", so transcripts can carry credentials.
+		const safe = redactMessages(messages);
+		const res = (await memory.extract({
+			messages: safe as never,
+			sessionId: extractOpts.sessionId,
+			scope: extractOpts.scope ?? scope,
+			...(extractOpts.actorId ? { actorId: extractOpts.actorId } : {}),
+		})) as unknown[];
+		if (useGit && res.length > 0) commitBrain(root, `memory: extract ${extractOpts.sessionId} (+${res.length})`);
+		return res;
+	};
+
 	return {
 		memory,
 		root,
@@ -90,20 +106,20 @@ export async function createBrainEngine(opts: BrainEngineOptions = {}): Promise<
 			if (block.length > max) block = `${block.slice(0, max).trimEnd()}\n…[memory truncated]`;
 			return { block, count: ctx.memories.length };
 		},
-		async extract(messages, extractOpts) {
-			// Redaction is OURS — the library does not scrub secrets, and ingest scope
-			// is "all sessions", so transcripts can carry credentials.
-			const safe = redactMessages(messages);
-			// RoleMessage.role is a plain string; the library narrows to a role union —
-			// cast across the boundary (the content is what extraction reads).
-			const res = (await memory.extract({
-				messages: safe as never,
-				sessionId: extractOpts.sessionId,
-				scope: extractOpts.scope ?? scope,
-				...(extractOpts.actorId ? { actorId: extractOpts.actorId } : {}),
-			})) as unknown[];
-			if (useGit && res.length > 0) commitBrain(root, `memory: extract ${extractOpts.sessionId} (+${res.length})`);
-			return res;
+		extract: doExtract,
+		async remember(text) {
+			// Explicit capture: feed the fact through the same redact→extract→commit path
+			// with a unique session key so it persists immediately (not just at the next dream).
+			// Framed as a short exchange so it clears the engine's min-messages floor.
+			return doExtract(
+				[
+					{ role: "system", content: "The user explicitly asked you to remember the following. Record it as a durable, reusable memory, preserving the specifics." },
+					{ role: "user", content: `Please remember this for future sessions: ${text}` },
+					{ role: "assistant", content: "Understood — I'll record that as a durable memory." },
+					{ role: "user", content: "Yes, keep it." },
+				],
+				{ sessionId: `manual:${Date.now()}` },
+			);
 		},
 		commit(message = "memory: ingest") {
 			// Explicit commit: always versions (the dreamer runs per-extract git OFF for

@@ -99,4 +99,13 @@ describe("createBrainEngine round-trip (fake provider)", () => {
 		expect(r.count).toBe(0);
 		expect(r.block).toBe("");
 	});
+	it("remember() persists an explicit fact (recallable)", async () => {
+		const engine = await createBrainEngine({ root, actorId: "tom", scope: "agent", git: false, provider: fakeProvider(EXTRACTION) });
+		const recorded = await engine.remember("Always deploy on Fridays via the release script.");
+		expect(recorded.length).toBeGreaterThan(0); // persisted via the redact→extract→commit path
+		// the fake returns the fixture memories; confirm they are recallable (the write landed).
+		const r = await engine.recall("how do I restart the daemon?");
+		expect(r.count).toBeGreaterThan(0);
+	});
+
 });

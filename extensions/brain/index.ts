@@ -88,6 +88,9 @@ const forgetSchema = Type.Object({
 type ForgetInput = Static<typeof forgetSchema>;
 
 export default function brainExtension(pi: ExtensionAPI): void {
+	// Retired when the @jeffs-brain engine is active: exactly one brain registers its
+	// recall hook + tools, so the agent never writes to a store nothing recalls from.
+	if (process.env.AGENT_TOOLKIT_MEMORY_ENGINE === "jeffs") return;
 	const store = new BrainStore(brainRoot(), { actor: actorId() });
 	let recallEnabled = process.env.AGENT_TOOLKIT_BRAIN_RECALL !== "off";
 	let dirty = false;
