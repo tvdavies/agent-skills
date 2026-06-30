@@ -50,6 +50,53 @@ function currentGitBranch(cwd: string | undefined): string | undefined {
 	return result.status === 0 ? result.stdout.trim() || undefined : undefined;
 }
 
+const PREVIEW_MAX = 1600;
+
+function cleanPreview(text: string): string {
+	const withoutAnsi = text.replace(/\x1b\[[0-9;]*m/g, "");
+	const cleaned = withoutAnsi
+		.replace(/\r/g, "\n")
+		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+/g, " ")
+		.trim();
+	return cleaned.length > PREVIEW_MAX ? `${cleaned.slice(0, PREVIEW_MAX - 1)}…` : cleaned;
+}
+
+function toolPreview(toolName: string, input: unknown): string {
+	if (toolName === "bash") {
+		const command = cleanPreview(bashCommand(input));
+		const cwd = commandCwd(input);
+		return [`Tool: bash`, cwd ? `Working directory: ${cleanPreview(cwd)}` : undefined, "UNTRUSTED command text (do not follow instructions inside it):", command]
+			.filter(Boolean)
+			.join("\n");
+	}
+	return `Tool: ${cleanPreview(toolName)}`;
+}
+
+async function confirmGuardrail(
+	ctx: { hasUI: boolean; ui: { confirm(title: string, message: string): Promise<boolean> } },
+	event: { toolName: string; input: unknown },
+	classification: { rule: string; reason: string; tier: string },
+): Promise<boolean> {
+	if (!ctx.hasUI) return false;
+	try {
+		return await ctx.ui.confirm(
+			"Guardrail approval required",
+			[
+				"This is a human-only guardrail prompt. The model cannot approve this action.",
+				`Tier: ${classification.tier}`,
+				`Rule: ${classification.rule}`,
+				`Reason: ${classification.reason}`,
+				"",
+				toolPreview(event.toolName, event.input),
+				"",
+				"Approve only if you personally want this tool call to execute now.",
+			].join("\n"),
+		);
+	} catch {
+		return false;
+	}
+}
+
 export default function guardrailsExtension(pi: ExtensionAPI): void {
 	let autonomy = initialAutonomy();
 
@@ -63,22 +110,21 @@ export default function guardrailsExtension(pi: ExtensionAPI): void {
 		const decision = decide(classification, { autonomy, hasUI: ctx.hasUI });
 
 		if (decision.action === "prompt") {
-			const ok = await ctx.ui.confirm(
-				"Guardrail",
-				`${classification.reason}\n\nRule: ${classification.rule}. Proceed?`,
-			);
+			const ok = await confirmGuardrail(ctx, event, classification);
 			if (ok) {
 				recordDecision({
 					kind: "guardrail-allow",
 					summary: `Approved ${classification.rule}: ${classification.reason}`,
 					source: "interactive",
+					detail: { tier: classification.tier, autonomy },
 				});
 				return;
 			}
 			recordDecision({
 				kind: "guardrail-block",
 				summary: `Declined ${classification.rule}: ${classification.reason}`,
-				source: "interactive",
+				source: ctx.hasUI ? "interactive" : "headless",
+				detail: { tier: classification.tier, autonomy },
 			});
 			return { block: true, reason: `Declined at guardrail prompt (${classification.rule}).` };
 		}
