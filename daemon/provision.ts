@@ -46,6 +46,18 @@ export type ProvisionConfig = {
 };
 
 const MEMORY_MAX = "8G";
+const SHELL_SAFE_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+function shellQuote(value: string): string {
+	if (SHELL_SAFE_RE.test(value)) return value;
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function systemdQuote(value: string): string {
+	const escaped = value.replace(/%/g, "%%");
+	if (SHELL_SAFE_RE.test(escaped)) return escaped;
+	return JSON.stringify(escaped);
+}
 
 /** Environment exports written to the per-instance env file (no secrets here). */
 export function renderEnvFile(cfg: ProvisionConfig): string {
@@ -56,18 +68,18 @@ export function renderEnvFile(cfg: ProvisionConfig): string {
 	// Make node/pi/bun and user CLIs (tadu) resolvable under systemd (PATH is minimal there).
 	const bunBinDir = cfg.bunBin ? dirname(cfg.bunBin) : undefined;
 	const pathDirs = [cfg.nodeBinDir, cfg.userBinDir, bunBinDir].filter((d, i, a) => d && a.indexOf(d) === i);
-	if (pathDirs.length) lines.push(`export PATH=${pathDirs.join(":")}:$PATH`);
-	if (cfg.piBin) lines.push(`export AGENT_TOOLKIT_PI_BIN=${cfg.piBin}`);
-	if (cfg.bunBin) lines.push(`export AGENT_TOOLKIT_BUN_BIN=${cfg.bunBin}`);
-	if (cfg.brainBin) lines.push(`export AGENT_TOOLKIT_BRAIN_BIN=${cfg.brainBin}`);
+	if (pathDirs.length) lines.push(`export PATH=${shellQuote(pathDirs.join(":"))}:$PATH`);
+	if (cfg.piBin) lines.push(`export AGENT_TOOLKIT_PI_BIN=${shellQuote(cfg.piBin)}`);
+	if (cfg.bunBin) lines.push(`export AGENT_TOOLKIT_BUN_BIN=${shellQuote(cfg.bunBin)}`);
+	if (cfg.brainBin) lines.push(`export AGENT_TOOLKIT_BRAIN_BIN=${shellQuote(cfg.brainBin)}`);
 	lines.push(
-		`export AGENT_TOOLKIT_STATE_DIR=${cfg.stateDir}`,
-		`export AGENT_TOOLKIT_BRAIN_ROOT=${cfg.brainRoot}`,
-		`export AGENT_TOOLKIT_SESSION_DIR=${cfg.sessionDir}`,
+		`export AGENT_TOOLKIT_STATE_DIR=${shellQuote(cfg.stateDir)}`,
+		`export AGENT_TOOLKIT_BRAIN_ROOT=${shellQuote(cfg.brainRoot)}`,
+		`export AGENT_TOOLKIT_SESSION_DIR=${shellQuote(cfg.sessionDir)}`,
 		// Memory = the bundled external `brain` CLI. "okf" reverts to the in-process
 		// OKF brain; "off" disables memory.
 		`export AGENT_TOOLKIT_MEMORY_ENGINE=brain`,
-		cfg.model ? `export AGENT_TOOLKIT_MODEL=${cfg.model}` : `# export AGENT_TOOLKIT_MODEL=anthropic/claude-opus-4-8`,
+		cfg.model ? `export AGENT_TOOLKIT_MODEL=${shellQuote(cfg.model)}` : `# export AGENT_TOOLKIT_MODEL=anthropic/claude-opus-4-8`,
 		``,
 		`# --- secrets (Phase 3+) ---`,
 		`# export SLACK_APP_TOKEN=xapp-...`,
@@ -93,7 +105,7 @@ set -euo pipefail
 
 # Refuse to start if the secrets env file is group/world accessible or not owned
 # by us — the env file is a security boundary, not a convenience.
-ENV_FILE="${cfg.envFile}"
+ENV_FILE=${shellQuote(cfg.envFile)}
 if [ -f "$ENV_FILE" ]; then
   perms=$(stat -c '%a' "$ENV_FILE")
   owner=$(stat -c '%u' "$ENV_FILE")
@@ -109,15 +121,15 @@ if [ -f "$ENV_FILE" ]; then
   source "$ENV_FILE"
 fi
 
-cd "${cfg.repoDir}"
+cd ${shellQuote(cfg.repoDir)}
 ${
 	cfg.preflightEntry
 		? `# Self-update rollback guard: if a self-update restart keeps failing to boot,
 # revert the checkout to the last-good commit before starting (best-effort).
-${cfg.runtime} "${cfg.preflightEntry}" || true
+${cfg.runtime} ${shellQuote(cfg.preflightEntry)} || true
 `
 		: ""
-}exec ${cfg.runtime} "${cfg.daemonEntry}"
+}exec ${cfg.runtime} ${shellQuote(cfg.daemonEntry)}
 `;
 }
 
@@ -130,8 +142,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${launcherPath}
-WorkingDirectory=${cfg.repoDir}
+ExecStart=${systemdQuote(launcherPath)}
+WorkingDirectory=${systemdQuote(cfg.repoDir)}
 Restart=always
 RestartSec=2
 NoNewPrivileges=yes
@@ -154,14 +166,14 @@ export function renderInstallInstructions(
 		"# Deferred install — review, then run these yourself:",
 		``,
 		`# 1. Create the 0600 secrets env file (paths are pre-filled):`,
-		`install -m 600 /dev/null ${paths.envFile}   # then edit to add secrets`,
+		`install -m 600 /dev/null ${shellQuote(paths.envFile)}   # then edit to add secrets`,
 		``,
 		`# 2. Make the launcher executable:`,
-		`chmod 0755 ${paths.launcher}`,
+		`chmod 0755 ${shellQuote(paths.launcher)}`,
 		``,
 		`# 3. Install and start the user service:`,
 		`mkdir -p ~/.config/systemd/user`,
-		`cp ${paths.unit} ~/.config/systemd/user/${unitName}`,
+		`cp ${shellQuote(paths.unit)} ~/.config/systemd/user/${unitName}`,
 		`systemctl --user daemon-reload`,
 		`systemctl --user enable --now ${unitName}`,
 		``,

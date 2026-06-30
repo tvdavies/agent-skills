@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
 	type ProvisionConfig,
 	renderEnvFile,
@@ -45,6 +46,35 @@ describe("renderEnvFile", () => {
 		expect(out).toContain("/home/tom/.bun/bin:$PATH");
 		expect(out).toContain("export AGENT_TOOLKIT_BUN_BIN=/home/tom/.bun/bin/bun");
 	});
+
+	it("shell-quotes exported paths with spaces and metacharacters", () => {
+		const weird = {
+			...cfg,
+			stateDir: "/tmp/agent toolkit/$state;rm",
+			brainRoot: "/tmp/brain root/it's-private",
+			sessionDir: "/tmp/sessions & traces",
+			brainBin: "/tmp/agent toolkit/bin/brain",
+			nodeBinDir: "/tmp/node bin",
+			bunBin: "/tmp/bun bin/bun",
+			userBinDir: "/tmp/user bin",
+		};
+		const out = renderEnvFile(weird);
+		const r = spawnSync(
+			"bash",
+			[
+				"-c",
+				`${out}\nprintf '%s\\0' "$AGENT_TOOLKIT_STATE_DIR" "$AGENT_TOOLKIT_BRAIN_ROOT" "$AGENT_TOOLKIT_SESSION_DIR" "$AGENT_TOOLKIT_BRAIN_BIN" "$PATH"`,
+			],
+			{ encoding: "utf8", env: { PATH: "/usr/bin" } },
+		);
+		expect(r.status).toBe(0);
+		const [state, brainRoot, sessionDir, brainBin, path] = r.stdout.split("\0");
+		expect(state).toBe(weird.stateDir);
+		expect(brainRoot).toBe(weird.brainRoot);
+		expect(sessionDir).toBe(weird.sessionDir);
+		expect(brainBin).toBe(weird.brainBin);
+		expect(path).toBe("/tmp/node bin:/tmp/user bin:/tmp/bun bin:/usr/bin");
+	});
 });
 
 describe("renderLauncher", () => {
@@ -54,9 +84,7 @@ describe("renderLauncher", () => {
 		expect(out).toContain("set -euo pipefail");
 		expect(out).toContain("refusing to start");
 		expect(out).toContain('source "$ENV_FILE"');
-		expect(out).toContain(
-			'exec node --experimental-transform-types --no-warnings "/home/tom/agent-toolkit/bin/toolkit-daemon.ts"',
-		);
+		expect(out).toContain("exec node --experimental-transform-types --no-warnings /home/tom/agent-toolkit/bin/toolkit-daemon.ts");
 		expect(out).not.toContain("toolkit-preflight"); // omitted when no preflightEntry
 	});
 
@@ -67,7 +95,7 @@ describe("renderLauncher", () => {
 		const exec = out.indexOf("exec node");
 		expect(pre).toBeGreaterThan(-1);
 		expect(pre).toBeLessThan(exec);
-		expect(out).toContain('"/home/tom/agent-toolkit/bin/toolkit-preflight.ts" || true');
+		expect(out).toContain("/home/tom/agent-toolkit/bin/toolkit-preflight.ts || true");
 	});
 });
 
@@ -78,6 +106,15 @@ describe("renderSystemdUnit", () => {
 		expect(out).toContain("Type=simple");
 		expect(out).toContain("Restart=always");
 		expect(out).toContain("ExecStart=/home/tom/.config/agent-toolkit/launch.sh");
+		expect(out).toContain("WorkingDirectory=/home/tom/agent-toolkit");
+		expect(out).toContain("WantedBy=default.target");
+		expect(out).toContain("NoNewPrivileges=yes");
+	});
+
+	it("quotes systemd paths with spaces and escapes percent specifiers", () => {
+		const out = renderSystemdUnit({ ...cfg, repoDir: "/home/tom/agent toolkit/%repo" }, "/home/tom/agent toolkit/launch.sh");
+		expect(out).toContain('ExecStart="/home/tom/agent toolkit/launch.sh"');
+		expect(out).toContain('WorkingDirectory="/home/tom/agent toolkit/%%repo"');
 		expect(out).toContain("WantedBy=default.target");
 		expect(out).toContain("NoNewPrivileges=yes");
 	});

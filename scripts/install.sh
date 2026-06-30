@@ -47,6 +47,13 @@ enable_or_restart_unit() {
   fi
 }
 shell_quote() { printf '%q' "$1"; }
+systemd_quote() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//%/%%}"
+  printf '"%s"' "$s"
+}
 need node; need pi; need git; need npm
 [ -d "$REPO/brain" ] && need bun
 command -v rg   >/dev/null 2>&1 || echo "warning: ripgrep (rg) not found — brain recall needs it" >&2
@@ -105,8 +112,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$REPO
-ExecStart=/usr/bin/env bash -lc 'source "$CONFIG/serve.env" 2>/dev/null || true; exec "$REPO/bin/brain" daemon run'
+WorkingDirectory=$(systemd_quote "$REPO")
+ExecStart=/usr/bin/env bash -lc 'source "$1" 2>/dev/null || true; exec "$2" daemon run' _ $(systemd_quote "$CONFIG/serve.env") $(systemd_quote "$REPO/bin/brain")
 Restart=always
 RestartSec=2
 NoNewPrivileges=yes
@@ -132,7 +139,7 @@ if [ "$WITH_SCHEDULE" = true ]; then
 Description=Agent Toolkit heartbeat trigger
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env bash -lc 'source $CONFIG/serve.env 2>/dev/null; exec $NODE_BIN --experimental-transform-types --no-warnings $REPO/bin/toolkit-trigger.ts --cron-job heartbeat'
+ExecStart=/usr/bin/env bash -lc 'source "$1" 2>/dev/null; exec "$2" --experimental-transform-types --no-warnings "$3" --cron-job heartbeat' _ $(systemd_quote "$CONFIG/serve.env") $(systemd_quote "$NODE_BIN") $(systemd_quote "$REPO/bin/toolkit-trigger.ts")
 EOF
   cat > "$UNITDIR/$INSTANCE-heartbeat.timer" <<EOF
 [Unit]
